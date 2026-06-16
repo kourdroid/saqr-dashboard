@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SAQR Command Center</title>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --card: #111827;
+    --border: #1f2937;
+    --text: #e2e8f0;
+    --muted: #6b7280;
+    --accent: #f59e0b;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --blue: #3b82f6;
+    --purple: #8b5cf6;
+    --col-backlog: #374151;
+    --col-ready: #2563eb;
+    --col-progress: #f59e0b;
+    --col-blocked: #dc2626;
+    --col-done: #16a34a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'Segoe UI', 'SF Mono', monospace;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+  }
+  .header {
+    background: var(--card); border-bottom: 1px solid var(--border);
+    padding: 16px 24px; display: flex; align-items: center; gap: 16px;
+  }
+  .header h1 {
+    font-size: 20px; font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .header .subtitle { color: var(--muted); font-size: 13px; }
+  .header .status-dot {
+    width: 10px; height: 10px; border-radius: 50%; margin-left: auto;
+  }
+  .header .status-dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .header .status-dot.error { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  .tabs {
+    display: flex; gap: 2px; background: var(--card); padding: 0 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    padding: 12px 20px; cursor: pointer; font-size: 13px; font-weight: 500;
+    color: var(--muted); border-bottom: 2px solid transparent; transition: all .15s;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .content { padding: 20px 24px; max-width: 1400px; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* Stats cards */
+  .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; text-align: center;
+  }
+  .stat-card .num { font-size: 28px; font-weight: 700; }
+  .stat-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-top: 4px; }
+  .stat-card.green .num { color: var(--green); }
+  .stat-card.red .num { color: var(--red); }
+  .stat-card.blue .num { color: var(--blue); }
+  .stat-card.yellow .num { color: var(--yellow); }
+  .stat-card.purple .num { color: var(--purple); }
+
+  /* Kanban */
+  .kanban-board { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; min-height: 400px; }
+  .kanban-col {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    display: flex; flex-direction: column; min-height: 300px;
+  }
+  .kanban-col-header {
+    padding: 10px 12px; font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .5px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .kanban-col-header .count {
+    background: var(--border); padding: 1px 8px; border-radius: 10px; font-size: 11px;
+  }
+  .kanban-col-body {
+    padding: 8px; flex: 1; display: flex; flex-direction: column; gap: 6px;
+    min-height: 100px;
+  }
+  .kanban-col-body.drag-over { background: rgba(245,158,11,.08); border-radius: 4px; }
+  .kanban-card {
+    background: #1a2332; border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; cursor: grab; font-size: 13px; transition: all .1s;
+    position: relative;
+  }
+  .kanban-card:hover { border-color: var(--accent); }
+  .kanban-card.dragging { opacity: .4; }
+  .kanban-card .card-title { font-weight: 500; margin-bottom: 2px; }
+  .kanban-card .card-body { font-size: 11px; color: var(--muted); margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .kanban-card .card-meta { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .kanban-card .card-priority {
+    font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 600;
+  }
+  .pri-2 { background: var(--red); color: white; }
+  .pri-1 { background: var(--accent); color: black; }
+  .pri-0 { background: var(--border); color: var(--muted); }
+  .kanban-card .card-delete {
+    position: absolute; top: 4px; right: 6px; cursor: pointer; color: var(--muted);
+    font-size: 14px; opacity: 0; transition: opacity .1s;
+  }
+  .kanban-card:hover .card-delete { opacity: 1; }
+  .kanban-card .card-delete:hover { color: var(--red); }
+
+  /* Add task form */
+  .add-task-form {
+    display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;
+  }
+  .add-task-form input, .add-task-form select {
+    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; color: var(--text); font-size: 13px;
+  }
+  .add-task-form input[type="text"] { flex: 1; min-width: 200px; }
+  .add-task-form button {
+    background: var(--accent); color: black; border: none; border-radius: 6px;
+    padding: 8px 16px; font-weight: 600; font-size: 13px; cursor: pointer;
+  }
+  .add-task-form button:hover { opacity: .9; }
+
+  /* Cron table */
+  .cron-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .cron-table th {
+    text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border);
+    color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+  }
+  .cron-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .cron-table tr:hover td { background: rgba(255,255,255,.02); }
+  .health-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600;
+  }
+  .health-badge.ok { background: rgba(34,197,94,.15); color: var(--green); }
+  .health-badge.error { background: rgba(239,68,68,.15); color: var(--red); }
+  .health-badge.paused { background: rgba(107,114,128,.15); color: var(--muted); }
+  .health-badge.stale { background: rgba(234,179,8,.15); color: var(--yellow); }
+  .health-badge.never_run { background: rgba(59,130,246,.15); color: var(--blue); }
+
+  /* Pipeline */
+  .pipeline-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .profile-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px;
+  }
+  .profile-card h3 { font-size: 14px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .job-item {
+    padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .job-item:last-child { border-bottom: none; }
+  .job-item .company { font-weight: 600; }
+  .job-item .title { color: var(--muted); font-size: 12px; }
+  .job-item .status-tag {
+    display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; margin-left: 6px;
+  }
+  .status-tag.applied { background: rgba(34,197,94,.15); color: var(--green); }
+  .status-tag.new { background: rgba(59,130,246,.15); color: var(--blue); }
+
+  /* Credits grid */
+  .credits-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px,1fr)); gap: 12px; }
+  .credit-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; text-align: center;
+  }
+  .credit-card .key-name { font-size: 12px; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px; }
+  .credit-card .key-status { font-size: 24px; }
+  .credit-card .key-status.active { color: var(--green); }
+  .credit-card .key-status.inactive { color: var(--red); }
+
+  /* Missions */
+  .mission-list { list-style: none; }
+  .mission-list li {
+    padding: 8px 12px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 6px; margin-bottom: 6px; font-size: 13px;
+    border-left: 3px solid var(--accent);
+  }
+
+  @media (max-width: 900px) {
+    .kanban-board { grid-template-columns: 1fr; }
+    .pipeline-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>◈ SAQR Command Center</h1>
+  <span class="subtitle" id="timeDisplay"></span>
+  <div class="status-dot ok" id="healthDot" title="API Status"></div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="kanban">Kanban</div>
+  <div class="tab" data-tab="cron">Cron Health</div>
+  <div class="tab" data-tab="pipeline">Pipeline</div>
+  <div class="tab" data-tab="credits">API Credits</div>
+  <div class="tab" data-tab="soul">Missions</div>
+</div>
+
+<div class="content">
+
+<div id="tab-kanban" class="tab-content active">
+  <div class="add-task-form">
+    <input type="text" id="newTaskTitle" placeholder="New task...">
+    <select id="newTaskCol">
+      <option value="backlog">Backlog</option>
+      <option value="ready">Ready</option>
+      <option value="in_progress">In Progress</option>
+      <option value="blocked">Blocked</option>
+      <option value="done">Done</option>
+    </select>
+    <select id="newTaskPri">
+      <option value="0">Normal</option>
+      <option value="1">High</option>
+      <option value="2">Critical</option>
+    </select>
+    <button onclick="addTask()">+ Add</button>
+  </div>
+  <div class="kanban-board" id="kanbanBoard"></div>
+</div>
+
+<div id="tab-cron" class="tab-content">
+  <table class="cron-table">
+    <thead><tr><th>Job</th><th>Schedule</th><th>Health</th><th>Last Run</th><th>Status</th></tr></thead>
+    <tbody id="cronBody"></tbody>
+  </table>
+</div>
+
+<div id="tab-pipeline" class="tab-content">
+  <div class="pipeline-grid" id="pipelineGrid">
+    <div class="profile-card"><h3>🐦 Mehdi</h3><div id="mehdiPipeline">Loading...</div></div>
+    <div class="profile-card"><h3>🛡️ Mohammed</h3><div id="kourchalPipeline">Loading...</div></div>
+  </div>
+</div>
+
+<div id="tab-credits" class="tab-content">
+  <div class="credits-grid" id="creditsGrid"></div>
+</div>
+
+<div id="tab-soul" class="tab-content">
+  <div class="stats-row" id="missionStats"></div>
+  <ul class="mission-list" id="missionList"></ul>
+  <h3 style="margin-top:20px;font-size:14px;color:var(--muted);">Cron Schedule</h3>
+  <table class="cron-table" style="margin-top:8px;">
+    <thead><tr><th>Time (UTC)</th><th>Job</th><th>Profile</th><th>Deliver</th></tr></thead>
+    <tbody id="scheduleBody"></tbody>
+  </table>
+</div>
+
+</div>
+
+<script>
+const COLUMNS = [
+  { key: 'backlog', label: 'Backlog', color: 'var(--col-backlog)' },
+  { key: 'ready', label: 'Ready', color: 'var(--col-ready)' },
+  { key: 'in_progress', label: 'In Progress', color: 'var(--col-progress)' },
+  { key: 'blocked', label: 'Blocked', color: 'var(--col-blocked)' },
+  { key: 'done', label: 'Done', color: 'var(--col-done)' },
+];
+
+// ── Tabs ──
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
+// ── Time ──
+function updateTime() {
+  document.getElementById('timeDisplay').textContent =
+    new Date().toLocaleString('en-US', { timeZone: 'UTC', hour12: false }) + ' UTC';
+}
+setInterval(updateTime, 1000);
+updateTime();
+
+// ── API helper ──
+async function api(path, opts = {}) {
+  const r = await fetch('/api' + path, {
+    headers: { 'Content-Type': 'application/json', ...opts.headers },
+    ...opts,
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+// ── Kanban ──
+let tasks = [];
+
+function statusLabel(s) {
+  const m = { backlog: 'Backlog', ready: 'Ready', in_progress: 'In Progress', blocked: 'Blocked', done: 'Done' };
+  return m[s] || s;
+}
+function priLabel(p) { return ['', 'High', 'Critical'][p] || ''; }
+
+function renderKanban() {
+  const board = document.getElementById('kanbanBoard');
+  board.innerHTML = COLUMNS.map(col => {
+    const colTasks = tasks.filter(t => t.status === col.key);
+    return `<div class="kanban-col" data-col="${col.key}">
+      <div class="kanban-col-header" style="border-left:3px solid ${col.color};">
+        <span>${col.label}</span>
+        <span class="count">${colTasks.length}</span>
+      </div>
+      <div class="kanban-col-body" ondragover="e=>e.preventDefault()" data-col="${col.key}">
+        ${colTasks.map(t => `
+          <div class="kanban-card" draggable="true" data-id="${t.id}" ondragstart="dragStart(event)" ondragend="dragEnd(event)">
+            <div class="card-priority ${t.priority > 0 ? 'pri-' + t.priority : ''}" style="display:${t.priority > 0 ? 'inline-block' : 'none'}">${priLabel(t.priority)}</div>
+            <div class="card-title">${escHtml(t.title)}</div>
+            ${t.body ? `<div class="card-body">${escHtml(t.body)}</div>` : ''}
+            <div class="card-meta">
+              ${t.assignee ? `<span style="font-size:10px;color:var(--muted);">👤 ${escHtml(t.assignee)}</span>` : ''}
+            </div>
+            <span class="card-delete" onclick="deleteTask('${t.id}')">×</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>`;
+  }).join('');
+
+  // Drop handlers
+  document.querySelectorAll('.kanban-col-body').forEach(col => {
+    col.addEventListener('dragover', e => { e.preventDefault(); col.classList.add('drag-over'); });
+    col.addEventListener('dragleave', () => col.classList.remove('drag-over'));
+    col.addEventListener('drop', e => {
+      e.preventDefault();
+      col.classList.remove('drag-over');
+      const id = e.dataTransfer.getData('text/plain');
+      const newStatus = col.dataset.col;
+      api('/kanban-tasks/' + id, { method: 'PATCH', body: JSON.stringify({ status: newStatus }) });
+      loadKanban();
+    });
+  });
+}
+
+function dragStart(e) {
+  e.dataTransfer.setData('text/plain', e.target.closest('.kanban-card').dataset.id);
+  setTimeout(() => e.target.closest('.kanban-card').classList.add('dragging'), 0);
+}
+function dragEnd(e) {
+  e.target.closest('.kanban-card').classList.remove('dragging');
+}
+
+async function loadKanban() {
+  tasks = await api('/kanban-tasks');
+  renderKanban();
+}
+
+async function addTask() {
+  const title = document.getElementById('newTaskTitle').value.trim();
+  if (!title) return;
+  const status = document.getElementById('newTaskCol').value;
+  const priority = parseInt(document.getElementById('newTaskPri').value);
+  await api('/kanban-tasks', {
+    method: 'POST',
+    body: JSON.stringify({ title, status, priority }),
+  });
+  document.getElementById('newTaskTitle').value = '';
+  loadKanban();
+}
+
+async function deleteTask(id) {
+  if (!confirm('Delete task?')) return;
+  await api('/kanban-tasks/' + id, { method: 'DELETE' });
+  loadKanban();
+}
+
+// ── Cron ──
+async function loadCron() {
+  const jobs = await api('/cron-jobs');
+  const tbody = document.getElementById('cronBody');
+  tbody.innerHTML = jobs.map(j => {
+    const lastRun = j.last_run_at ? new Date(j.last_run_at).toLocaleString() : '—';
+    return `<tr>
+      <td><strong>${escHtml(j.name)}</strong></td>
+      <td><code>${escHtml(j.schedule.expr)}</code></td>
+      <td><span class="health-badge ${j.health}">${j.health}</span></td>
+      <td>${lastRun}</td>
+      <td>${j.last_status || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Pipeline ──
+async function loadPipeline() {
+  const data = await api('/pipeline');
+  document.getElementById('mehdiPipeline').innerHTML = `
+    <div class="stats-row" style="grid-template-columns:1fr 1fr;">
+      <div class="stat-card blue"><div class="num">${data.mehdi.count}</div><div class="label">Total Leads</div></div>
+      <div class="stat-card green"><div class="num">${data.mehdi.applied}</div><div class="label">Applied</div></div>
+    </div>`;
+  document.getElementById('kourchalPipeline').innerHTML = `
+    <div class="stats-row" style="grid-template-columns:1fr 1fr;">
+      <div class="stat-card blue"><div class="num">${data.kourchal.count}</div><div class="label">Total Leads</div></div>
+      <div class="stat-card green"><div class="num">${data.kourchal.applied}</div><div class="label">Applied</div></div>
+    </div>`;
+}
+
+// ── Credits ──
+async function loadCredits() {
+  const creds = await api('/credits');
+  const grid = document.getElementById('creditsGrid');
+  const names = { apify: 'Apify', tavily: 'Tavily', brave: 'Brave Search', openrouter: 'OpenRouter', ninja: 'API Ninja' };
+  grid.innerHTML = Object.entries(creds).map(([k, v]) =>
+    `<div class="credit-card">
+      <div class="key-name">${names[k] || k}</div>
+      <div class="key-status ${v ? 'active' : 'inactive'}">${v ? '✓' : '✗'}</div>
+    </div>`
+  ).join('');
+}
+
+// ── Soul ──
+async function loadSoul() {
+  const data = await api('/soul-summary');
+  const list = document.getElementById('missionList');
+  list.innerHTML = data.missions.map(m => `<li>${escHtml(m)}</li>`).join('');
+  document.getElementById('missionStats').innerHTML =
+    `<div class="stat-card yellow"><div class="num">${data.missions.length}</div><div class="label">Active Missions</div></div>`
+    + `<div class="stat-card purple"><div class="num">${data.schedule.length}</div><div class="label">Scheduled Jobs</div></div>`;
+  const tbody = document.getElementById('scheduleBody');
+  tbody.innerHTML = data.schedule.map(s =>
+    `<tr><td>${escHtml(s.time)}</td><td><strong>${escHtml(s.job)}</strong></td><td>${escHtml(s.profile)}</td><td>${escHtml(s.deliver)}</td></tr>`
+  ).join('');
+}
+
+// ── Health check ──
+async function checkHealth() {
+  try {
+    await api('/health');
+    document.getElementById('healthDot').className = 'status-dot ok';
+  } catch (e) {
+    document.getElementById('healthDot').className = 'status-dot error';
+  }
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+// ── Init ──
+setInterval(checkHealth, 30000);
+checkHealth();
+loadKanban();
+loadCron();
+loadPipeline();
+loadCredits();
+loadSoul();
+setInterval(loadKanban, 10000);
+</script>
+</body>
+</html>
