@@ -1,255 +1,271 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api.js'
 
-const SUGGESTIONS = [
-  'Find job leads for Python Developer',
-  'Summarize container resource logs',
-  'Check current cron operations health',
-  'List active system alerts',
+const INITIAL_LINES = [
+  { id: 'boot-1', kind: 'system', text: 'Hermes TUI attached to SAQR command queue.' },
+  { id: 'boot-2', kind: 'system', text: 'Commands: help, status, logs, tasks, task <id>, clear. Any other input queues a Hermes task.' },
 ]
 
-const WELCOME_MESSAGE = {
-  id: 'welcome',
-  role: 'agent',
-  content: 'SAQR is ready. Submit a command to create a Hermes task, then inspect the task detail for execution evidence.',
-  timestamp: '--:--',
+function formatTimestamp() {
+  return new Date().toLocaleTimeString([], { hour12: false })
 }
 
-function loadInitialMessages() {
-  try {
-    const saved = sessionStorage.getItem('saqr_chat_history')
-    if (saved) {
-      const parsed = JSON.parse(saved)
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed
-    }
-  } catch {
-    sessionStorage.removeItem('saqr_chat_history')
-  }
-  return [WELCOME_MESSAGE]
+function statusClass(status) {
+  return String(status || 'unknown').replaceAll('_', '-')
 }
 
-function currentTimestamp() {
-  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+function summarizeTask(task) {
+  const runs = task.runs || []
+  const events = task.events || []
+  const latestRun = runs.length > 0 ? runs[runs.length - 1] : null
+  const summary = latestRun?.summary || task.result || task.last_failure_error || 'No Hermes summary recorded yet.'
+  return [
+    `task ${task.id} :: ${task.status}`,
+    `title: ${task.title}`,
+    `assignee: ${task.assignee || 'default'} | priority: ${task.priority ?? 0}`,
+    `runs: ${runs.length} | events: ${events.length}`,
+    summary,
+  ].join('\n')
 }
 
 export default function ChatPage({ onOpenTaskDetail }) {
-  const [messages, setMessages] = useState(loadInitialMessages)
+  const [lines, setLines] = useState(INITIAL_LINES)
   const [inputText, setInputText] = useState('')
-  const [isThinking, setIsThinking] = useState(false)
-  const messagesEndRef = useRef(null)
+  const [activeTaskId, setActiveTaskId] = useState('')
+  const [busy, setBusy] = useState(false)
+  const terminalEndRef = useRef(null)
   const pollIntervalRef = useRef(null)
-  const messageIdRef = useRef(0)
+  const lineIdRef = useRef(0)
 
   useEffect(() => {
-    sessionStorage.setItem('saqr_chat_history', JSON.stringify(messages))
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, isThinking])
+    terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [lines, busy])
 
   useEffect(() => {
     return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current)
-      }
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
     }
   }, [])
 
-  const nextMessageId = (prefix) => {
-    messageIdRef.current += 1
-    return `${prefix}-${messageIdRef.current}`
+  const appendLine = (kind, text, meta = {}) => {
+    lineIdRef.current += 1
+    setLines((current) => [
+      ...current,
+      { id: `line-${lineIdRef.current}`, kind, text, timestamp: formatTimestamp(), ...meta },
+    ])
   }
 
-  const appendMessage = (message) => {
-    setMessages((current) => [...current, message])
+  const appendBlock = (kind, rows, meta = {}) => {
+    appendLine(kind, rows.filter(Boolean).join('\n'), meta)
   }
 
-  const pollTaskStatus = (taskId) => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current)
-    }
+  const clearTerminal = () => {
+    setLines(INITIAL_LINES)
+  }
+
+  const stopPolling = () => {
+    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
+    pollIntervalRef.current = null
+    setActiveTaskId('')
+    setBusy(false)
+  }
+
+  const pollTask = (taskId) => {
+    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
+    setActiveTaskId(taskId)
 
     pollIntervalRef.current = setInterval(async () => {
       try {
-        const taskData = await api(`/kanban-tasks/${taskId}`)
-        const { status, runs } = taskData
+        const task = await api(`/kanban-tasks/${taskId}`)
+        appendBlock('event', [
+          `poll ${taskId}: ${task.status}`,
+          task.runs?.length ? `latest run: ${task.runs[task.runs.length - 1]?.outcome || 'unknown'}` : 'runs: none yet',
+        ], { taskId })
 
-        if (status !== 'done' && status !== 'blocked') return
+        if (task.status !== 'done' && task.status !== 'blocked') return
 
-        clearInterval(pollIntervalRef.current)
-        pollIntervalRef.current = null
-
-        const latestRun = runs && runs.length > 0 ? runs[runs.length - 1] : null
-        const content = latestRun?.summary || taskData.result ||
-          (status === 'done'
-            ? 'Task completed, but Hermes did not record a summary.'
-            : 'Task blocked. Inspect the task detail and container logs.')
-
-        let durationSecs = null
-        if (latestRun?.started_at && latestRun?.ended_at) {
-          const start = new Date(latestRun.started_at)
-          const end = new Date(latestRun.ended_at)
-          if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
-            durationSecs = Math.round((end - start) / 1000)
-          }
-        }
-
-        appendMessage({
-          id: taskId,
-          role: 'agent',
-          content,
-          timestamp: currentTimestamp(),
-          status,
-          duration: durationSecs,
-          outcome: latestRun?.outcome,
-        })
-        setIsThinking(false)
+        appendLine(task.status === 'done' ? 'success' : 'error', summarizeTask(task), { taskId })
+        stopPolling()
       } catch (error) {
-        clearInterval(pollIntervalRef.current)
-        pollIntervalRef.current = null
-        appendMessage({
-          id: nextMessageId('agent-poll-error'),
-          role: 'agent',
-          content: `Lost connection while polling task ${taskId}: ${error.message}`,
-          timestamp: currentTimestamp(),
-          status: 'error',
-          taskId,
-        })
-        setIsThinking(false)
+        appendLine('error', `poll failed for ${taskId}: ${error.message}`, { taskId })
+        stopPolling()
       }
-    }, 2000)
+    }, 3000)
   }
 
-  const handleSend = async (text) => {
-    const promptText = text.trim()
-    if (!promptText || isThinking) return
-
-    setInputText('')
-    appendMessage({
-      id: nextMessageId('user'),
-      role: 'user',
-      content: promptText,
-      timestamp: currentTimestamp(),
-    })
-    setIsThinking(true)
-
+  const queueHermesTask = async (prompt) => {
+    setBusy(true)
+    appendLine('input', prompt)
+    appendLine('system', 'queueing Hermes task...')
     try {
       const task = await api('/kanban-tasks', {
         method: 'POST',
         body: JSON.stringify({
-          title: promptText,
-          body: 'Triggered via direct chat console command',
+          title: prompt,
+          body: 'Triggered from Hermes terminal console',
           status: 'ready',
           priority: 1,
           assignee: 'default',
         }),
       })
-      pollTaskStatus(task.id)
+      appendLine('success', `queued ${task.id}; waiting for Hermes gateway to claim it`, { taskId: task.id })
+      pollTask(task.id)
     } catch (error) {
-      appendMessage({
-        id: nextMessageId('agent-error'),
-        role: 'agent',
-        content: `Unable to submit task: ${error.message}`,
-        timestamp: currentTimestamp(),
-        status: 'error',
-      })
-      setIsThinking(false)
+      appendLine('error', `queue failed: ${error.message}`)
+      setBusy(false)
     }
   }
 
-  const clearHistory = () => {
-    if (!window.confirm('Clear the chat console session history?')) return
-    setMessages([{ ...WELCOME_MESSAGE, content: 'Console cleared. Submit a command to begin a new task.' }])
+  const runTerminalCommand = async (raw) => {
+    const command = raw.trim()
+    if (!command) return
+    setInputText('')
+
+    const [verb, ...args] = command.split(/\s+/)
+    const normalized = verb.toLowerCase()
+
+    if (normalized === 'clear') {
+      clearTerminal()
+      return
+    }
+
+    if (normalized === 'help') {
+      appendLine('input', command)
+      appendBlock('system', [
+        'help',
+        '  status      show container and queue health',
+        '  logs        tail Hermes container logs',
+        '  tasks       list current command queue',
+        '  task <id>   inspect one task',
+        '  clear       clear terminal output',
+        '  <anything>  queue text as a Hermes task',
+      ])
+      return
+    }
+
+    if (normalized === 'status') {
+      appendLine('input', command)
+      try {
+        const overview = await api('/overview')
+        appendBlock('system', [
+          `container: ${overview.container?.status || 'unknown'}`,
+          `tasks: ${overview.tasks?.total || 0}`,
+          `ready: ${overview.tasks?.by_status?.ready || 0}`,
+          `running: ${overview.tasks?.by_status?.in_progress || 0}`,
+          `blocked: ${overview.tasks?.by_status?.blocked || 0}`,
+          `cron errors: ${overview.cron?.by_health?.error || 0}`,
+        ])
+      } catch (error) {
+        appendLine('error', `status failed: ${error.message}`)
+      }
+      return
+    }
+
+    if (normalized === 'logs') {
+      appendLine('input', command)
+      try {
+        const logs = await api('/container/logs?lines=80')
+        appendLine(logs.ok ? 'system' : 'error', logs.stdout || logs.stderr || 'no logs')
+      } catch (error) {
+        appendLine('error', `logs failed: ${error.message}`)
+      }
+      return
+    }
+
+    if (normalized === 'tasks') {
+      appendLine('input', command)
+      try {
+        const tasks = await api('/kanban-tasks')
+        appendLine('system', tasks.slice(0, 12).map((task) => (
+          `${task.id}  ${task.status.padEnd(11)}  p${task.priority}  ${task.title}`
+        )).join('\n') || 'no tasks')
+      } catch (error) {
+        appendLine('error', `tasks failed: ${error.message}`)
+      }
+      return
+    }
+
+    if (normalized === 'task') {
+      const taskId = args[0]
+      appendLine('input', command)
+      if (!taskId) {
+        appendLine('error', 'usage: task <id>')
+        return
+      }
+      try {
+        const task = await api(`/kanban-tasks/${taskId}`)
+        appendLine('system', summarizeTask(task), { taskId })
+      } catch (error) {
+        appendLine('error', `task inspect failed: ${error.message}`)
+      }
+      return
+    }
+
+    await queueHermesTask(command)
   }
 
   return (
-    <div className="chat-container text-glow">
-      <div className="chat-quick-suggestions">
-        {SUGGESTIONS.map((suggestion) => (
-          <button
-            key={suggestion}
-            className="quick-chip"
-            onClick={() => handleSend(suggestion)}
-            disabled={isThinking}
-          >
-            {suggestion}
-          </button>
-        ))}
-        <button
-          className="quick-chip"
-          style={{ marginLeft: 'auto', background: 'rgba(242, 92, 92, 0.1)', color: '#fca5a5', borderColor: 'rgba(242, 92, 92, 0.2)' }}
-          onClick={clearHistory}
-        >
-          Clear Session
-        </button>
-      </div>
+    <section className="terminal-page">
+      <div className="terminal-window">
+        <div className="terminal-titlebar">
+          <div>
+            <strong>Hermes TUI</strong>
+            <span>SAQR queue terminal</span>
+          </div>
+          <div className="terminal-title-actions">
+            {activeTaskId && (
+              <button className="terminal-link" onClick={() => onOpenTaskDetail(activeTaskId)}>
+                inspect {activeTaskId.substring(0, 6)}
+              </button>
+            )}
+            <button className="terminal-link" onClick={stopPolling} disabled={!busy}>
+              stop
+            </button>
+          </div>
+        </div>
 
-      <div className="chat-messages">
-        {messages.map((msg) => (
-          <div key={msg.id} className={`chat-bubble-wrap ${msg.role}`}>
-            <div className={`chat-bubble ${msg.role}`}>{msg.content}</div>
-
-            <div className="chat-meta-info">
-              <span>{msg.timestamp}</span>
-              {msg.role === 'agent' && msg.id !== 'welcome' && (
-                <>
-                  {msg.duration !== null && msg.duration !== undefined && (
-                    <span className="status-pill ok" style={{ height: '16px', padding: '0 5px', fontSize: '9px' }}>
-                      {msg.duration}s
-                    </span>
-                  )}
-                  {msg.status && (
-                    <span className={`status-pill ${msg.status}`} style={{ height: '16px', padding: '0 5px', fontSize: '9px' }}>
-                      {msg.status.toUpperCase()}
-                    </span>
-                  )}
-                  {msg.id && !msg.id.startsWith('agent-') && (
-                    <span className="chat-meta-link" onClick={() => onOpenTaskDetail(msg.id)}>
-                      Inspect #{msg.id.substring(0, 6)}
-                    </span>
-                  )}
-                </>
+        <div className="terminal-screen" aria-live="polite">
+          {lines.map((line) => (
+            <div key={line.id} className={`terminal-line ${statusClass(line.kind)}`}>
+              <span className="terminal-time">{line.timestamp || '--:--:--'}</span>
+              <span className="terminal-prompt">
+                {line.kind === 'input' ? '>' : line.kind}
+              </span>
+              <pre>{line.text}</pre>
+              {line.taskId && (
+                <button className="terminal-inspect" onClick={() => onOpenTaskDetail(line.taskId)}>
+                  inspect
+                </button>
               )}
             </div>
-          </div>
-        ))}
-
-        {isThinking && (
-          <div className="chat-bubble-wrap agent">
-            <div className="chat-bubble agent" style={{ padding: '8px 12px' }}>
-              <div className="typing-indicator">
-                <div className="typing-dot" />
-                <div className="typing-dot" />
-                <div className="typing-dot" />
-              </div>
+          ))}
+          {busy && (
+            <div className="terminal-line system">
+              <span className="terminal-time">{formatTimestamp()}</span>
+              <span className="terminal-prompt">wait</span>
+              <pre>Hermes task active; polling queue state...</pre>
             </div>
-            <div className="chat-meta-info">
-              <span>SAQR is working...</span>
-            </div>
-          </div>
-        )}
-        <div ref={messagesEndRef} />
-      </div>
+          )}
+          <div ref={terminalEndRef} />
+        </div>
 
-      <div className="chat-input-container">
-        <input
-          type="text"
-          className="chat-input"
-          placeholder={isThinking ? 'Please wait for the current operation to complete...' : 'Ask SAQR to run a task'}
-          value={inputText}
-          onChange={(event) => setInputText(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') handleSend(inputText)
-          }}
-          disabled={isThinking}
-        />
-        <button
-          className="primary"
-          style={{ minHeight: '40px', padding: '0 20px', borderRadius: '8px' }}
-          onClick={() => handleSend(inputText)}
-          disabled={isThinking || !inputText.trim()}
-        >
-          {isThinking ? 'Executing...' : 'Execute'}
-        </button>
+        <div className="terminal-input-row">
+          <span>saqr@hermes:~$</span>
+          <input
+            value={inputText}
+            onChange={(event) => setInputText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') runTerminalCommand(inputText)
+            }}
+            placeholder={busy ? 'wait for active task, or press stop' : 'type help or enter a Hermes task'}
+            disabled={false}
+            autoFocus
+          />
+          <button className="primary" onClick={() => runTerminalCommand(inputText)} disabled={!inputText.trim()}>
+            run
+          </button>
+        </div>
       </div>
-    </div>
+    </section>
   )
 }

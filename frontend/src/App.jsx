@@ -20,7 +20,7 @@ import { api, getApiToken, setApiToken } from './lib/api.js'
 
 const TABS = [
   { key: 'overview',   label: 'Overview' },
-  { key: 'chat',       label: 'Chat' },
+  { key: 'chat',       label: 'Terminal' },
   { key: 'kanban',     label: 'Kanban' },
   { key: 'cron',       label: 'Cron' },
   { key: 'pipeline',   label: 'Pipeline' },
