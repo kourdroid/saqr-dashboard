@@ -3,13 +3,13 @@ SAQR Command Center v2 — FastAPI backend
 Full control: Kanban, LLM config, cron management, container ops, logs.
 """
 
-import json, os, sqlite3, subprocess, time, uuid, re
+import hmac, hashlib, json, os, sqlite3, subprocess, time, uuid, re, threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -386,6 +386,25 @@ def run_script(name: str):
         return run(["bash", str(script_path)], timeout=120)
     return run(["python3", str(script_path)], timeout=120)
 
+
+# ── Webhook ──
+WEBHOOK_SECRET = "fc98c9ca6e57ce5bc07e07323724c252"
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    body = await request.body()
+    sig = request.headers.get("x-hub-signature-256", "")
+    expected = "sha256=" + hmac.new(WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(401, "invalid signature")
+    event = request.headers.get("x-github-event", "")
+    if event == "push":
+        def deploy():
+            time.sleep(1)
+            subprocess.run(["bash", "/root/saqr-dashboard/deploy.sh"], capture_output=True)
+        threading.Thread(target=deploy, daemon=True).start()
+        return {"ok": True, "message": "deploy triggered"}
+    return {"ok": True, "message": f"event {event} ignored"}
 
 if FRONTEND_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR / "assets")), name="assets")
