@@ -1,22 +1,22 @@
 #!/bin/bash
 set -e
-cd /root/saqr-dashboard
 
-# Push any local changes to GitHub first
-if [[ -n $(git status --porcelain) ]]; then
-    git add -A
-    git commit -m "Auto-sync: $(date -u '+%Y-%m-%d %H:%M UTC')" || true
+IMAGE="ghcr.io/kourdroid/saqr-dashboard:latest"
+
+if [ -z "$GHCR_PAT" ]; then
+  echo "Error: GHCR_PAT not set. Run: export GHCR_PAT=ghp_xxx"
+  exit 1
 fi
-git push origin main 2>&1
 
-# Pull latest from GitHub
-git pull origin main 2>&1
+echo "$GHCR_PAT" | docker login ghcr.io -u kourdroid --password-stdin
 
-# Rebuild frontend
-cd frontend
-npm run build 2>&1
-cd ..
+echo "Pulling $IMAGE..."
+docker pull "$IMAGE"
 
-# Restart service
-systemctl restart saqr-dashboard 2>&1
-echo "Deploy complete"
+echo "Recreating saqr service..."
+docker compose -f /root/docker-compose.yml up -d saqr
+
+echo "Cleaning up old images..."
+docker image prune -f
+
+echo "Deploy complete at $(date)"
