@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import './App.css'
 
@@ -14,12 +14,13 @@ import ContainerPanel from './components/ContainerPanel.jsx'
 import MissionsPage  from './components/MissionsPage.jsx'
 import ChatPage      from './components/ChatPage.jsx'
 import TaskDrawer    from './components/TaskDrawer.jsx'
+import { api, getApiToken, setApiToken } from './lib/api.js'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const TABS = [
   { key: 'overview',   label: 'Overview' },
-  { key: 'chat',       label: 'Chat' },
+  { key: 'chat',       label: 'Terminal' },
   { key: 'kanban',     label: 'Kanban' },
   { key: 'cron',       label: 'Cron' },
   { key: 'pipeline',   label: 'Pipeline' },
@@ -30,20 +31,6 @@ const TABS = [
 ]
 
 // ── API helper ────────────────────────────────────────────────────────────────
-
-async function api(path, opts = {}) {
-  const response = await fetch('/api' + path, {
-    headers: { 'Content-Type': 'application/json', ...opts.headers },
-    ...opts,
-  })
-  if (!response.ok) {
-    const text = await response.text()
-    let message = text || response.statusText
-    try { message = JSON.parse(text).detail || message } catch { /* keep raw */ }
-    throw new Error(message)
-  }
-  return response.json()
-}
 
 async function fetchSnapshot() {
   const [overview, tasks, cronJobs, pipeline, credits, config, soul, env, scripts, activities] = await Promise.all([
@@ -97,23 +84,29 @@ export default function App() {
   // Toast stack & drawer state
   const [toasts, setToasts] = useState([])
   const [selectedTaskId, setSelectedTaskId] = useState(null)
+  const [apiToken, setApiTokenState] = useState(() => getApiToken())
   const prevTasksRef = useRef([])
+  const toastIdRef = useRef(0)
 
   // ── Toast methods ───────────────────────────────────────────────────────────
 
-  const addToast = (text, type = 'info', taskId = null) => {
-    const id = `toast-${Date.now()}-${Math.random()}`
+  const dismissToast = useCallback((id) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id))
+  }, [])
+
+  const addToast = useCallback((text, type = 'info', taskId = null) => {
+    toastIdRef.current += 1
+    const id = `toast-${toastIdRef.current}`
     setToasts((prev) => [...prev, { id, text, type, taskId }])
-    
-    // Auto-dismiss after 4 seconds
     setTimeout(() => {
       dismissToast(id)
     }, 4000)
-  }
+  }, [dismissToast])
 
-  const dismissToast = (id) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id))
-  }
+  const handleApiTokenChange = useCallback((token) => {
+    setApiToken(token)
+    setApiTokenState(token.trim())
+  }, [])
 
   // Task status transitions detection
   useEffect(() => {
@@ -130,7 +123,7 @@ export default function App() {
       })
     }
     prevTasksRef.current = tasks
-  }, [tasks])
+  }, [tasks, addToast])
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
@@ -286,6 +279,8 @@ export default function App() {
         onRefresh={() => refreshNow(false)}
         onRestart={restartContainer}
         onTabChange={handleTabChange}
+        apiToken={apiToken}
+        onApiTokenChange={handleApiTokenChange}
       />
 
       <NoticeBar 

@@ -6,6 +6,7 @@ environment-key visibility, and local agent scripts.
 """
 
 import json
+import hmac
 import os
 import re
 import sqlite3
@@ -18,9 +19,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -38,6 +39,14 @@ VALID_STATUSES = {"backlog", "ready", "in_progress", "blocked", "done"}
 VALID_PRIORITIES = {0, 1, 2}
 MAX_LOG_LINES = 500
 SCRIPT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+AUTH_TOKEN = os.environ.get("SAQR_AUTH_TOKEN", "")
+ALLOW_UNAUTHENTICATED = os.environ.get("SAQR_ALLOW_UNAUTHENTICATED", "").lower() in {"1", "true", "yes"}
+PUBLIC_API_PATHS = {"/api/health"}
+ALLOWED_SCRIPTS = {
+    item.strip()
+    for item in os.environ.get("SAQR_ALLOWED_SCRIPTS", "").split(",")
+    if item.strip()
+}
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.environ.get(
@@ -54,6 +63,25 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+
+@app.middleware("http")
+async def require_api_auth(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api") or path in PUBLIC_API_PATHS or ALLOW_UNAUTHENTICATED:
+        return await call_next(request)
+    if not AUTH_TOKEN:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "SAQR_AUTH_TOKEN is not configured; protected API is locked"},
+        )
+    auth_header = request.headers.get("Authorization", "")
+    bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+    header_token = request.headers.get("X-Saqr-Token", "")
+    token = bearer or header_token
+    if not token or not hmac.compare_digest(token, AUTH_TOKEN):
+        return JSONResponse(status_code=401, content={"detail": "valid SAQR API token required"})
+    return await call_next(request)
 
 
 # Models
@@ -145,6 +173,49 @@ def ensure_kanban_schema() -> None:
             )
             """
         )
+        existing_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        additive_columns = {
+            "result": "TEXT",
+            "max_retries": "INTEGER NOT NULL DEFAULT 3",
+            "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+            "last_failure_error": "TEXT",
+        }
+        for column, definition in additive_columns.items():
+            if column not in existing_columns:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                profile TEXT,
+                step_key TEXT,
+                status TEXT,
+                outcome TEXT,
+                summary TEXT,
+                started_at INTEGER,
+                ended_at INTEGER,
+                error TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_task_runs_task_id ON task_runs (task_id, id)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                run_id INTEGER,
+                kind TEXT,
+                payload TEXT,
+                created_at INTEGER
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events (task_id, id)")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_tasks_status_priority_created
@@ -290,6 +361,7 @@ def delete_kanban_task(task_id: str) -> None:
 
 
 def get_kanban_task_detail(task_id: str) -> dict[str, Any]:
+    ensure_kanban_schema()
     with sqlite3.connect(str(KANBAN_DB)) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -597,10 +669,10 @@ def cron_trigger(job_id: str) -> dict[str, Any]:
     job = next((item for item in data.get("jobs", []) if item.get("id") == job_id), None)
     if job is None:
         raise HTTPException(404, "job not found")
-    return {
-        "ok": True,
-        "message": f"Queued manual trigger placeholder for {job.get('name', job_id)}",
-    }
+    raise HTTPException(
+        501,
+        f"Manual trigger is not wired for {job.get('name', job_id)}; use the Hermes scheduler path",
+    )
 
 
 @app.get("/api/pipeline")
@@ -708,6 +780,7 @@ def list_scripts() -> list[dict[str, Any]]:
                     "name": script.name,
                     "size": script.stat().st_size,
                     "modified": datetime.fromtimestamp(script.stat().st_mtime, tz=timezone.utc).isoformat(),
+                    "runnable": script.name in ALLOWED_SCRIPTS,
                 }
             )
     return files
@@ -718,6 +791,8 @@ def run_script(name: str) -> dict[str, Any]:
     script_path = safe_script_path(name)
     if not script_path.exists():
         raise HTTPException(404, "script not found")
+    if name not in ALLOWED_SCRIPTS:
+        raise HTTPException(403, "script is not in SAQR_ALLOWED_SCRIPTS")
     if script_path.suffix == ".sh":
         return run(["bash", str(script_path)], timeout=120)
     return run(["python3", str(script_path)], timeout=120)

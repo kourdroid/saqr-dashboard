@@ -1,5 +1,3 @@
-import React from 'react';
-
 const timeAgo = (dateStr) => {
   if (!dateStr) return '';
   const d = new Date(dateStr);
