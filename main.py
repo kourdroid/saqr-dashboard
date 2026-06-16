@@ -1,34 +1,62 @@
 """
-SAQR Command Center v2 — FastAPI backend
-Full control: Kanban, LLM config, cron management, container ops, logs.
+SAQR Command Center v2 - FastAPI backend for the Hermes agent.
+
+Controls Kanban work, LLM config, cron state, container operations, logs,
+environment-key visibility, and local agent scripts.
 """
 
-import hmac, hashlib, json, os, sqlite3, subprocess, time, uuid, re, threading
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import time
+import uuid
 from datetime import datetime, timezone
+from json import JSONDecodeError
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-DATA_DIR = Path("/docker/hermes-agent-0hzy/data")
+DATA_DIR = Path(os.environ.get("SAQR_DATA_DIR", "/docker/hermes-agent-0hzy/data"))
 KANBAN_DB = DATA_DIR / "kanban.db"
 CRON_JOBS = DATA_DIR / "cron" / "jobs.json"
 JOBS_FILE = DATA_DIR / "jobs.json"
 SOUL_FILE = DATA_DIR / "saqr" / "SOUL.md"
 ENV_FILE = DATA_DIR / ".env"
 CONFIG_FILE = DATA_DIR / "config.yaml"
-CONTAINER_NAME = "hermes-agent-0hzy-hermes-agent-1"
+CONTAINER_NAME = os.environ.get("SAQR_CONTAINER_NAME", "hermes-agent-0hzy-hermes-agent-1")
+FRONTEND_DIR = Path(__file__).parent / "frontend" / "dist"
 
-app = FastAPI(title="SAQR Command Center", version="2.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+VALID_STATUSES = {"backlog", "ready", "in_progress", "blocked", "done"}
+VALID_PRIORITIES = {0, 1, 2}
+MAX_LOG_LINES = 500
+SCRIPT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "SAQR_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
+
+app = FastAPI(title="SAQR Command Center", version="2.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 
-# ── Models ──
+# Models
 
 class TaskCreate(BaseModel):
     title: str
@@ -37,12 +65,14 @@ class TaskCreate(BaseModel):
     priority: int = 0
     assignee: str = ""
 
+
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
     body: Optional[str] = None
     status: Optional[str] = None
     priority: Optional[int] = None
     assignee: Optional[str] = None
+
 
 class ConfigUpdate(BaseModel):
     model: Optional[str] = None
@@ -52,81 +82,216 @@ class ConfigUpdate(BaseModel):
     temperature: Optional[float] = None
 
 
-# ── Helpers ──
+class RawConfigUpdate(BaseModel):
+    text: str
 
-def read_json(path):
-    try: return json.loads(path.read_text())
-    except Exception: return {}
 
-def write_json(path, data):
-    path.write_text(json.dumps(data, indent=2))
-    return True
+# Helpers
 
-def run(cmd, timeout=10):
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def read_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return {"ok": r.returncode == 0, "stdout": r.stdout[:10000], "stderr": r.stderr[:5000]}
+        return json.loads(path.read_text(encoding="utf-8"))
+    except JSONDecodeError as exc:
+        raise HTTPException(500, f"Invalid JSON in {path.name}: {exc.msg}") from exc
+    except OSError as exc:
+        raise HTTPException(500, f"Cannot read {path.name}: {exc}") from exc
+
+
+def write_json(path: Path, data: Any) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(500, f"Cannot write {path.name}: {exc}") from exc
+
+
+def run(cmd: list[str], timeout: int = 10) -> dict[str, Any]:
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return {
+            "ok": result.returncode == 0,
+            "returncode": result.returncode,
+            "stdout": result.stdout[:10000],
+            "stderr": result.stderr[:5000],
+        }
     except subprocess.TimeoutExpired:
-        return {"ok": False, "stdout": "", "stderr": "timeout"}
-    except Exception as e:
-        return {"ok": False, "stdout": "", "stderr": str(e)}
+        return {"ok": False, "returncode": None, "stdout": "", "stderr": "timeout"}
+    except OSError as exc:
+        return {"ok": False, "returncode": None, "stdout": "", "stderr": str(exc)}
 
 
-# ── Kanban ──
+def ensure_kanban_schema() -> None:
+    KANBAN_DB.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(KANBAN_DB)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'backlog',
+                priority INTEGER NOT NULL DEFAULT 0,
+                assignee TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER,
+                created_by TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tasks_status_priority_created
+            ON tasks (status, priority, created_at)
+            """
+        )
 
-def get_kanban():
-    conn = sqlite3.connect(str(KANBAN_DB))
-    conn.row_factory = sqlite3.Row
-    tasks = [dict(r) for r in conn.execute(
-        "SELECT id, title, body, status, priority, assignee, created_at, started_at, completed_at, created_by "
-        "FROM tasks ORDER BY priority DESC, created_at DESC"
-    ).fetchall()]
-    conn.close()
-    for t in tasks:
-        for k in ("created_at", "started_at", "completed_at"):
-            if t.get(k):
-                try: t[k] = datetime.fromtimestamp(t[k], tz=timezone.utc).isoformat()
-                except: t[k] = None
+
+def validate_task_status(status: Optional[str]) -> None:
+    if status is not None and status not in VALID_STATUSES:
+        raise HTTPException(400, f"status must be one of {sorted(VALID_STATUSES)}")
+
+
+def validate_priority(priority: Optional[int]) -> None:
+    if priority is not None and priority not in VALID_PRIORITIES:
+        raise HTTPException(400, "priority must be 0, 1, or 2")
+
+
+def validate_task_create(task: TaskCreate) -> None:
+    if not task.title.strip():
+        raise HTTPException(400, "title is required")
+    validate_task_status(task.status)
+    validate_priority(task.priority)
+
+
+def validate_task_update(update: TaskUpdate) -> None:
+    if update.title is not None and not update.title.strip():
+        raise HTTPException(400, "title cannot be empty")
+    validate_task_status(update.status)
+    validate_priority(update.priority)
+
+
+def timestamp_to_iso(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def scripts_dir() -> Path:
+    return DATA_DIR / "saqr" / "scripts"
+
+
+def safe_script_path(name: str) -> Path:
+    if not SCRIPT_NAME_RE.fullmatch(name):
+        raise HTTPException(400, "script name may only contain letters, numbers, dots, dashes, and underscores")
+    root = scripts_dir().resolve()
+    script_path = (root / name).resolve()
+    try:
+        script_path.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(400, "script path escapes scripts directory") from exc
+    if script_path.suffix not in {".py", ".sh"}:
+        raise HTTPException(400, "script must be a .py or .sh file")
+    return script_path
+
+
+# Kanban
+
+def get_kanban() -> list[dict[str, Any]]:
+    ensure_kanban_schema()
+    with sqlite3.connect(str(KANBAN_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        tasks = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT id, title, body, status, priority, assignee,
+                       created_at, started_at, completed_at, created_by
+                FROM tasks
+                ORDER BY priority DESC, created_at DESC
+                """
+            ).fetchall()
+        ]
+    for task in tasks:
+        for key in ("created_at", "started_at", "completed_at"):
+            task[key] = timestamp_to_iso(task.get(key))
     return tasks
 
-def add_kanban_task(task: TaskCreate):
-    tid = uuid.uuid4().hex[:12]
+
+def add_kanban_task(task: TaskCreate) -> str:
+    validate_task_create(task)
+    task_id = uuid.uuid4().hex[:12]
     now = int(time.time())
-    conn = sqlite3.connect(str(KANBAN_DB))
-    conn.execute("INSERT INTO tasks (id, title, body, status, priority, assignee, created_at) VALUES (?,?,?,?,?,?,?)",
-                 (tid, task.title, task.body, task.status, task.priority, task.assignee, now))
-    conn.commit()
-    conn.close()
-    return tid
+    ensure_kanban_schema()
+    with sqlite3.connect(str(KANBAN_DB)) as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks (id, title, body, status, priority, assignee, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                task.title.strip(),
+                task.body,
+                task.status,
+                task.priority,
+                task.assignee,
+                now,
+            ),
+        )
+    return task_id
 
-def update_kanban_task(task_id: str, update: TaskUpdate):
-    fields = {}
-    for k in ("title", "body", "status", "priority", "assignee"):
-        v = getattr(update, k, None)
-        if v is not None: fields[k] = v
-    if not fields: return
+
+def update_kanban_task(task_id: str, update: TaskUpdate) -> None:
+    validate_task_update(update)
+    fields: dict[str, Any] = {}
+    for key in ("title", "body", "status", "priority", "assignee"):
+        value = getattr(update, key, None)
+        if value is not None:
+            fields[key] = value.strip() if isinstance(value, str) else value
+    if not fields:
+        return
+
     now = int(time.time())
-    if fields.get("status") == "in_progress": fields["started_at"] = now
-    elif fields.get("status") == "done": fields["completed_at"] = now
-    sets = ", ".join(f"{k}=?" for k in fields)
-    conn = sqlite3.connect(str(KANBAN_DB))
-    conn.execute(f"UPDATE tasks SET {sets} WHERE id=?", list(fields.values()) + [task_id])
-    conn.commit()
-    conn.close()
+    if fields.get("status") == "in_progress":
+        fields["started_at"] = now
+    elif fields.get("status") == "done":
+        fields["completed_at"] = now
 
-def delete_kanban_task(task_id: str):
-    conn = sqlite3.connect(str(KANBAN_DB))
-    conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-    conn.commit()
-    conn.close()
+    columns = ", ".join(f"{key}=?" for key in fields)
+    ensure_kanban_schema()
+    with sqlite3.connect(str(KANBAN_DB)) as conn:
+        cursor = conn.execute(
+            f"UPDATE tasks SET {columns} WHERE id=?",
+            list(fields.values()) + [task_id],
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(404, "task not found")
 
 
-# ── LLM Config ──
+def delete_kanban_task(task_id: str) -> None:
+    ensure_kanban_schema()
+    with sqlite3.connect(str(KANBAN_DB)) as conn:
+        cursor = conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(404, "task not found")
 
-def read_config():
+
+# Config
+
+def read_config() -> dict[str, Any]:
     if not CONFIG_FILE.exists():
         return {}
-    text = CONFIG_FILE.read_text()
+    text = CONFIG_FILE.read_text(encoding="utf-8")
     raw = yaml.safe_load(text) or {}
     return {
         "raw": text,
@@ -136,170 +301,98 @@ def read_config():
         "delegation": raw.get("delegation", {}),
     }
 
-def write_config_model(model_cfg: dict):
-    if not CONFIG_FILE.exists():
-        raise HTTPException(404, "config.yaml not found")
-    text = CONFIG_FILE.read_text()
-    lines = text.splitlines()
-    new_lines = []
-    in_model = False
-    wrote = False
-    for line in lines:
-        stripped = line.rstrip()
-        if stripped == "model:":
-            in_model = True
-            new_lines.append(stripped)
-            continue
-        if in_model:
-            if stripped.startswith("  ") or stripped == "" or stripped.startswith("#"):
-                continue
-            else:
-                in_model = False
-                new_lines.append(stripped)
-                continue
-        new_lines.append(stripped)
-    if not wrote:
-        new_lines.insert(0, "model:")
-        for k, v in model_cfg.items():
-            new_lines.insert(1, f"  {k}: {v}")
-    CONFIG_FILE.write_text("\n".join(new_lines) + "\n")
-    return True
 
-
-# ── Routes ──
-
-FRONTEND_DIR = Path(__file__).parent / "frontend" / "dist"
-
-@app.get("/api/health")
-def health():
-    c = run(["docker", "inspect", CONTAINER_NAME, "--format", "{{.State.Status}}"])
+def read_config_summary() -> dict[str, Any]:
+    config = read_config()
     return {
-        "status": "ok",
-        "time": datetime.now(timezone.utc).isoformat(),
-        "container": c.get("stdout", "unknown").strip(),
+        "model": config.get("model", {}),
+        "agent": config.get("agent", {}),
+        "fallback_count": len(config.get("fallback_providers", [])),
+        "has_raw": bool(config.get("raw")),
     }
 
-# ── Kanban ──
-@app.get("/api/kanban-tasks")
-def list_tasks(): return get_kanban()
 
-@app.post("/api/kanban-tasks")
-def create_task(task: TaskCreate):
-    return {"id": add_kanban_task(task)}
+def update_config_file(update: ConfigUpdate) -> None:
+    if not CONFIG_FILE.exists():
+        raise HTTPException(404, "config.yaml not found")
+    cfg = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8")) or {}
+    model_cfg = cfg.setdefault("model", {})
+    if update.model is not None:
+        model_cfg["default"] = update.model
+    if update.provider is not None:
+        model_cfg["provider"] = update.provider
+    if update.base_url is not None:
+        model_cfg["base_url"] = update.base_url
+    if update.temperature is not None:
+        model_cfg["temperature"] = update.temperature
+    if update.max_turns is not None:
+        cfg.setdefault("agent", {})["max_turns"] = update.max_turns
+    CONFIG_FILE.write_text(
+        yaml.dump(cfg, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
 
-@app.patch("/api/kanban-tasks/{task_id}")
-def patch_task(task_id: str, update: TaskUpdate):
-    update_kanban_task(task_id, update)
-    return {"ok": True}
 
-@app.delete("/api/kanban-tasks/{task_id}")
-def remove_task(task_id: str):
-    delete_kanban_task(task_id)
-    return {"ok": True}
+def write_raw_config(text: str) -> None:
+    if not text.strip():
+        raise HTTPException(400, "text required")
+    try:
+        yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise HTTPException(400, f"invalid YAML: {exc}") from exc
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(text, encoding="utf-8")
 
-# ── LLM Config ──
-@app.get("/api/config")
-def config_get():
-    return read_config()
 
-@app.put("/api/config")
-def config_update(update: ConfigUpdate):
-    cfg = yaml.safe_load(CONFIG_FILE.read_text()) or {}
-    mod = cfg.setdefault("model", {})
-    if update.model is not None: mod["default"] = update.model
-    if update.provider is not None: mod["provider"] = update.provider
-    if update.base_url is not None: mod["base_url"] = update.base_url
-    if update.max_turns is not None: cfg.setdefault("agent", {})["max_turns"] = update.max_turns
-    CONFIG_FILE.write_text(yaml.dump(cfg, default_flow_style=False, sort_keys=False))
-    return {"ok": True, "message": "Config updated. Restart container to apply."}
+# Aggregations
 
-@app.get("/api/config/raw")
-def config_raw():
-    return {"text": CONFIG_FILE.read_text() if CONFIG_FILE.exists() else ""}
-
-@app.put("/api/config/raw")
-def config_raw_update(data: dict):
-    text = data.get("text", "")
-    if not text: raise HTTPException(400, "text required")
-    CONFIG_FILE.write_text(text)
-    return {"ok": True, "message": "Config written. Restart container to apply."}
-
-@app.post("/api/config/restart")
-def config_restart():
-    return run(["docker", "restart", CONTAINER_NAME], timeout=60)
-
-# ── Cron ──
-@app.get("/api/cron-jobs")
-def cron_status():
-    data = read_json(CRON_JOBS)
+def cron_jobs_with_health() -> list[dict[str, Any]]:
+    data = read_json(CRON_JOBS, {"jobs": []})
     jobs = data.get("jobs", [])
-    for j in jobs:
-        if j.get("enabled") is False or j.get("state") == "paused":
-            j["health"] = "paused"
-        elif j.get("last_status") == "error":
-            j["health"] = "error"
-        elif j.get("last_run_at"):
+    for job in jobs:
+        if job.get("enabled") is False or job.get("state") == "paused":
+            job["health"] = "paused"
+        elif job.get("last_status") == "error":
+            job["health"] = "error"
+        elif job.get("last_run_at"):
             try:
-                last = datetime.fromisoformat(j["last_run_at"].replace("Z", "+00:00"))
-                age = (datetime.now(timezone.utc) - last).total_seconds() / 3600
-                j["health"] = "ok" if age < 48 else "stale"
-            except:
-                j["health"] = "unknown"
+                last = datetime.fromisoformat(job["last_run_at"].replace("Z", "+00:00"))
+                age_hours = (datetime.now(timezone.utc) - last).total_seconds() / 3600
+                job["health"] = "ok" if age_hours < 48 else "stale"
+            except ValueError:
+                job["health"] = "unknown"
         else:
-            j["health"] = "never_run"
+            job["health"] = "never_run"
     return jobs
 
-@app.post("/api/cron/{job_id}/toggle")
-def cron_toggle(job_id: str):
-    data = read_json(CRON_JOBS)
-    for j in data.get("jobs", []):
-        if j["id"] == job_id:
-            j["enabled"] = not j.get("enabled", True)
-            j["state"] = "scheduled" if j["enabled"] else "paused"
-            if not j["enabled"]:
-                j["paused_at"] = datetime.now(timezone.utc).isoformat()
-            else:
-                j["paused_at"] = None
-                j["paused_reason"] = None
-            write_json(CRON_JOBS, data)
-            return {"ok": True, "enabled": j["enabled"]}
-    raise HTTPException(404, "job not found")
 
-@app.post("/api/cron/{job_id}/trigger")
-def cron_trigger(job_id: str):
-    return run(["python3", "-c", f"""
-import json, subprocess
-from pathlib import Path
-data = json.loads(Path('/docker/hermes-agent-0hzy/data/cron/jobs.json').read_text())
-for j in data['jobs']:
-    if j['id'] == '{job_id}':
-        print(f"Triggered: {{j['name']}}")
-        break
-"""])
-# ── Pipeline ──
-@app.get("/api/pipeline")
-def pipeline_stats():
-    data = read_json(JOBS_FILE)
+def pipeline_stats_data() -> dict[str, Any]:
+    data = read_json(JOBS_FILE, {"jobs": []})
     jobs = data.get("jobs", [])
-    kourchal = [j for j in jobs if j.get("profile") == "kourchal"]
-    mehdi = [j for j in jobs if j.get("profile") != "kourchal"]
+    kourchal = [job for job in jobs if job.get("profile") == "kourchal"]
+    mehdi = [job for job in jobs if job.get("profile") != "kourchal"]
     return {
         "total": len(jobs),
-        "mehdi": {"total": len(mehdi), "applied": sum(1 for j in mehdi if j.get("status") == "applied")},
-        "kourchal": {"total": len(kourchal), "applied": sum(1 for j in kourchal if j.get("status") == "applied")},
+        "mehdi": {
+            "total": len(mehdi),
+            "applied": sum(1 for job in mehdi if job.get("status") == "applied"),
+        },
+        "kourchal": {
+            "total": len(kourchal),
+            "applied": sum(1 for job in kourchal if job.get("status") == "applied"),
+        },
         "recent": jobs[-5:],
     }
 
-# ── Credits ──
-@app.get("/api/credits")
-def credit_status():
-    env = {}
+
+def credit_status_data() -> dict[str, bool]:
+    env: dict[str, str] = {}
     if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().splitlines():
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip().strip('"').strip("'")
+                key, value = line.split("=", 1)
+                env[key.strip()] = value.strip().strip('"').strip("'")
     return {
         "apify": bool(env.get("APIFY_API_KEY")),
         "tavily": bool(env.get("TAVILY_API_KEY")),
@@ -309,77 +402,262 @@ def credit_status():
         "opencode_zen": bool(env.get("OPCODE_ZEN_API_KEY")),
     }
 
-# ── Soul ──
-@app.get("/api/soul-summary")
-def soul_summary():
-    if not SOUL_FILE.exists():
-        return {"missions": [], "schedule": []}
-    text = SOUL_FILE.read_text()
-    missions, schedule = [], []
-    in_mission = in_schedule = False
-    for line in text.splitlines():
-        if line.startswith("## §1."):
-            in_mission = True; continue
-        if line.startswith("## §"):
-            in_mission = in_schedule = False
-        if line.strip() == "**Cron schedule (locked, 2026-06-15)**":
-            in_schedule = True; continue
-        if in_mission and line.strip().startswith(("1.", "2.", "3.", "4.")):
-            missions.append(line.strip().split("—")[-1].strip() if "—" in line else line.strip())
-        if in_schedule and line.strip().startswith("|") and "|---|---|---" not in line:
-            parts = [p.strip() for p in line.strip().split("|") if p.strip()]
-            if len(parts) >= 4:
-                schedule.append({"time": parts[0], "job": parts[1], "profile": parts[2], "deliver": parts[3]})
-    return {"missions": missions, "schedule": schedule}
 
-# ── Container ──
-@app.get("/api/container")
-def container_info():
+def container_state() -> dict[str, Any]:
+    result = run(["docker", "inspect", CONTAINER_NAME, "--format", "{{.State.Status}}"])
+    status = result["stdout"].strip() if result["ok"] else "unknown"
+    return {"status": status, "ok": status == "running", "detail": result}
+
+
+def count_by_key(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(key) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+# Routes
+
+@app.get("/api/health")
+def health() -> dict[str, Any]:
+    container = container_state()
     return {
-        "inspect": run(["docker", "inspect", CONTAINER_NAME, "--format",
-            '{{.State.Status}}\t{{.State.StartedAt}}\t{{.Config.Image}}']),
-        "logs_tail": run(["docker", "logs", "--tail", "50", CONTAINER_NAME]),
-        "stats": run(["docker", "stats", CONTAINER_NAME, "--no-stream", "--format",
-            '{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}']),
+        "status": "ok",
+        "time": utc_now(),
+        "container": container["status"],
+        "container_ok": container["ok"],
     }
 
-@app.post("/api/container/restart")
-def container_restart():
+
+@app.get("/api/overview")
+def overview() -> dict[str, Any]:
+    tasks = get_kanban()
+    cron_jobs = cron_jobs_with_health()
+    credits = credit_status_data()
+    return {
+        "generated_at": utc_now(),
+        "container": container_state(),
+        "tasks": {
+            "total": len(tasks),
+            "by_status": count_by_key(tasks, "status"),
+            "critical": sum(1 for task in tasks if task.get("priority") == 2),
+        },
+        "cron": {
+            "total": len(cron_jobs),
+            "by_health": count_by_key(cron_jobs, "health"),
+            "errors": [
+                {"id": job.get("id"), "name": job.get("name")}
+                for job in cron_jobs
+                if job.get("health") == "error"
+            ],
+        },
+        "pipeline": pipeline_stats_data(),
+        "credits": {
+            "active": sum(1 for value in credits.values() if value),
+            "total": len(credits),
+            "items": credits,
+        },
+        "config": read_config_summary(),
+    }
+
+
+@app.get("/api/kanban-tasks")
+def list_tasks() -> list[dict[str, Any]]:
+    return get_kanban()
+
+
+@app.post("/api/kanban-tasks")
+def create_task(task: TaskCreate) -> dict[str, str]:
+    return {"id": add_kanban_task(task)}
+
+
+@app.patch("/api/kanban-tasks/{task_id}")
+def patch_task(task_id: str, update: TaskUpdate) -> dict[str, bool]:
+    update_kanban_task(task_id, update)
+    return {"ok": True}
+
+
+@app.delete("/api/kanban-tasks/{task_id}")
+def remove_task(task_id: str) -> dict[str, bool]:
+    delete_kanban_task(task_id)
+    return {"ok": True}
+
+
+@app.get("/api/config")
+def config_get() -> dict[str, Any]:
+    return read_config()
+
+
+@app.put("/api/config")
+def config_update(update: ConfigUpdate) -> dict[str, str | bool]:
+    update_config_file(update)
+    return {"ok": True, "message": "Config updated. Restart container to apply."}
+
+
+@app.get("/api/config/raw")
+def config_raw() -> dict[str, str]:
+    return {"text": CONFIG_FILE.read_text(encoding="utf-8") if CONFIG_FILE.exists() else ""}
+
+
+@app.put("/api/config/raw")
+def config_raw_update(update: RawConfigUpdate) -> dict[str, str | bool]:
+    write_raw_config(update.text)
+    return {"ok": True, "message": "Config written. Restart container to apply."}
+
+
+@app.post("/api/config/restart")
+def config_restart() -> dict[str, Any]:
     return run(["docker", "restart", CONTAINER_NAME], timeout=60)
 
-@app.get("/api/container/logs")
-def container_logs(lines: int = 100):
-    return run(["docker", "logs", "--tail", str(lines), CONTAINER_NAME])
 
-# ── Env ──
+@app.get("/api/cron-jobs")
+def cron_status() -> list[dict[str, Any]]:
+    return cron_jobs_with_health()
+
+
+@app.post("/api/cron/{job_id}/toggle")
+def cron_toggle(job_id: str) -> dict[str, bool]:
+    data = read_json(CRON_JOBS, {"jobs": []})
+    for job in data.get("jobs", []):
+        if job.get("id") == job_id:
+            job["enabled"] = not job.get("enabled", True)
+            job["state"] = "scheduled" if job["enabled"] else "paused"
+            if job["enabled"]:
+                job["paused_at"] = None
+                job["paused_reason"] = None
+            else:
+                job["paused_at"] = utc_now()
+            write_json(CRON_JOBS, data)
+            return {"ok": True, "enabled": job["enabled"]}
+    raise HTTPException(404, "job not found")
+
+
+@app.post("/api/cron/{job_id}/trigger")
+def cron_trigger(job_id: str) -> dict[str, Any]:
+    data = read_json(CRON_JOBS, {"jobs": []})
+    job = next((item for item in data.get("jobs", []) if item.get("id") == job_id), None)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    return {
+        "ok": True,
+        "message": f"Queued manual trigger placeholder for {job.get('name', job_id)}",
+    }
+
+
+@app.get("/api/pipeline")
+def pipeline_stats() -> dict[str, Any]:
+    return pipeline_stats_data()
+
+
+@app.get("/api/credits")
+def credit_status() -> dict[str, bool]:
+    return credit_status_data()
+
+
+@app.get("/api/soul-summary")
+def soul_summary() -> dict[str, list[Any]]:
+    if not SOUL_FILE.exists():
+        return {"missions": [], "schedule": []}
+
+    text = SOUL_FILE.read_text(encoding="utf-8")
+    missions: list[str] = []
+    schedule: list[dict[str, str]] = []
+    in_mission = False
+    in_schedule = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if line.startswith("##") and "1." in line:
+            in_mission = True
+            in_schedule = False
+            continue
+        if line.startswith("##") and "1." not in line:
+            in_mission = False
+        if "Cron schedule" in stripped:
+            in_schedule = True
+            in_mission = False
+            continue
+        if in_mission and stripped.startswith(("1.", "2.", "3.", "4.")):
+            missions.append(stripped.split(" - ")[-1].strip() if " - " in stripped else stripped)
+        if in_schedule and stripped.startswith("|") and "---" not in stripped:
+            parts = [part.strip() for part in stripped.split("|") if part.strip()]
+            if len(parts) >= 4:
+                schedule.append(
+                    {"time": parts[0], "job": parts[1], "profile": parts[2], "deliver": parts[3]}
+                )
+    return {"missions": missions, "schedule": schedule}
+
+
+@app.get("/api/container")
+def container_info() -> dict[str, Any]:
+    return {
+        "inspect": run(
+            [
+                "docker",
+                "inspect",
+                CONTAINER_NAME,
+                "--format",
+                "{{.State.Status}}\t{{.State.StartedAt}}\t{{.Config.Image}}",
+            ]
+        ),
+        "logs_tail": run(["docker", "logs", "--tail", "50", CONTAINER_NAME]),
+        "stats": run(
+            [
+                "docker",
+                "stats",
+                CONTAINER_NAME,
+                "--no-stream",
+                "--format",
+                "{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}",
+            ]
+        ),
+    }
+
+
+@app.post("/api/container/restart")
+def container_restart() -> dict[str, Any]:
+    return run(["docker", "restart", CONTAINER_NAME], timeout=60)
+
+
+@app.get("/api/container/logs")
+def container_logs(lines: int = 100) -> dict[str, Any]:
+    safe_lines = min(max(lines, 1), MAX_LOG_LINES)
+    return run(["docker", "logs", "--tail", str(safe_lines), CONTAINER_NAME])
+
+
 @app.get("/api/env")
-def env_status():
-    """List env keys without exposing values."""
+def env_status() -> dict[str, list[str]]:
     if not ENV_FILE.exists():
-        return {}
+        return {"keys": []}
     keys = []
-    for line in ENV_FILE.read_text().splitlines():
+    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
-            k = line.split("=", 1)[0].strip()
-            keys.append(k)
+            keys.append(line.split("=", 1)[0].strip())
     return {"keys": sorted(keys)}
 
-# ── Scripts ──
+
 @app.get("/api/scripts")
-def list_scripts():
-    scripts_dir = DATA_DIR / "saqr" / "scripts"
-    if not scripts_dir.exists():
+def list_scripts() -> list[dict[str, Any]]:
+    root = scripts_dir()
+    if not root.exists():
         return []
     files = []
-    for f in sorted(scripts_dir.iterdir()):
-        if f.suffix in (".py", ".sh") and not f.name.startswith("__"):
-            files.append({"name": f.name, "size": f.stat().st_size, "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat()})
+    for script in sorted(root.iterdir()):
+        if script.is_file() and script.suffix in (".py", ".sh") and not script.name.startswith("__"):
+            files.append(
+                {
+                    "name": script.name,
+                    "size": script.stat().st_size,
+                    "modified": datetime.fromtimestamp(script.stat().st_mtime, tz=timezone.utc).isoformat(),
+                }
+            )
     return files
 
+
 @app.post("/api/scripts/{name}/run")
-def run_script(name: str):
-    script_path = DATA_DIR / "saqr" / "scripts" / name
+def run_script(name: str) -> dict[str, Any]:
+    script_path = safe_script_path(name)
     if not script_path.exists():
         raise HTTPException(404, "script not found")
     if script_path.suffix == ".sh":
@@ -387,33 +665,15 @@ def run_script(name: str):
     return run(["python3", str(script_path)], timeout=120)
 
 
-# ── Webhook ──
-WEBHOOK_SECRET = "fc98c9ca6e57ce5bc07e07323724c252"
-
-@app.post("/")
-@app.post("/webhook")
-async def webhook(request: Request):
-    body = await request.body()
-    sig = request.headers.get("x-hub-signature-256", "")
-    expected = "sha256=" + hmac.new(WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expected):
-        raise HTTPException(401, "invalid signature")
-    event = request.headers.get("x-github-event", "")
-    if event == "push":
-        def deploy():
-            time.sleep(1)
-            subprocess.run(["bash", "/root/saqr-dashboard/deploy.sh"], capture_output=True)
-        threading.Thread(target=deploy, daemon=True).start()
-        return {"ok": True, "message": "deploy triggered"}
-    return {"ok": True, "message": f"event {event} ignored"}
-
 if FRONTEND_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR / "assets")), name="assets")
 
     @app.get("/")
-    def index():
+    def index() -> FileResponse:
         return FileResponse(str(FRONTEND_DIR / "index.html"))
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=9090)

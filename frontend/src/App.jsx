@@ -1,143 +1,490 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 const API = ''
+
 const COLUMNS = [
-  { key: 'backlog', label: 'Backlog', color: '#6b7280' },
-  { key: 'ready', label: 'Ready', color: '#3b82f6' },
-  { key: 'in_progress', label: 'In Progress', color: '#f59e0b' },
-  { key: 'blocked', label: 'Blocked', color: '#ef4444' },
-  { key: 'done', label: 'Done', color: '#22c55e' },
+  { key: 'backlog', label: 'Backlog', color: '#64748b' },
+  { key: 'ready', label: 'Ready', color: '#2563eb' },
+  { key: 'in_progress', label: 'In Progress', color: '#d97706' },
+  { key: 'blocked', label: 'Blocked', color: '#dc2626' },
+  { key: 'done', label: 'Done', color: '#16a34a' },
 ]
 
-function api(path, opts = {}) {
-  return fetch(API + '/api' + path, {
+const TABS = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'kanban', label: 'Kanban' },
+  { key: 'cron', label: 'Cron' },
+  { key: 'pipeline', label: 'Pipeline' },
+  { key: 'config', label: 'Config' },
+  { key: 'scripts', label: 'Scripts' },
+  { key: 'container', label: 'Container' },
+  { key: 'soul', label: 'Missions' },
+]
+
+async function api(path, opts = {}) {
+  const response = await fetch(API + '/api' + path, {
     headers: { 'Content-Type': 'application/json', ...opts.headers },
     ...opts,
-  }).then(r => { if (!r.ok) throw new Error(r.statusText); return r.json() })
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    let message = text || response.statusText
+    try {
+      const parsed = JSON.parse(text)
+      message = parsed.detail || message
+    } catch {
+      // Keep the plain-text server response.
+    }
+    throw new Error(message)
+  }
+
+  return response.json()
+}
+
+async function fetchSnapshot() {
+  const [overview, tasks, cronJobs, pipeline, credits, config, soul, env, scripts] = await Promise.all([
+    api('/overview'),
+    api('/kanban-tasks'),
+    api('/cron-jobs'),
+    api('/pipeline'),
+    api('/credits'),
+    api('/config'),
+    api('/soul-summary'),
+    api('/env'),
+    api('/scripts'),
+  ])
+
+  return { overview, tasks, cronJobs, pipeline, credits, config, soul, env, scripts }
+}
+
+function formatTime(value) {
+  if (!value) return '-'
+  return new Date(value).toLocaleString()
+}
+
+function formatBytes(value) {
+  if (!Number.isFinite(value)) return '-'
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function statusClass(value) {
+  return String(value || 'unknown').replaceAll('_', '-')
 }
 
 function App() {
-  const [tab, setTab] = useState('kanban')
+  const [activeTab, setActiveTab] = useState('overview')
+  const [overview, setOverview] = useState(null)
   const [tasks, setTasks] = useState([])
   const [cronJobs, setCronJobs] = useState([])
   const [pipeline, setPipeline] = useState(null)
   const [credits, setCredits] = useState({})
   const [config, setConfig] = useState(null)
   const [configText, setConfigText] = useState('')
+  const [configTextDirty, setConfigTextDirty] = useState(false)
   const [soul, setSoul] = useState(null)
+  const [envKeys, setEnvKeys] = useState([])
+  const [scripts, setScripts] = useState([])
   const [container, setContainer] = useState(null)
   const [logs, setLogs] = useState('')
-  const [newTitle, setNewTitle] = useState('')
+  const [scriptOutput, setScriptOutput] = useState(null)
+  const [newTask, setNewTask] = useState({ title: '', status: 'backlog', priority: 0 })
+  const [loading, setLoading] = useState(true)
+  const [busyKey, setBusyKey] = useState('')
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
 
-  const load = useCallback(async () => {
+  const applySnapshot = useCallback((snapshot) => {
+    setOverview(snapshot.overview)
+    setTasks(snapshot.tasks)
+    setCronJobs(snapshot.cronJobs)
+    setPipeline(snapshot.pipeline)
+    setCredits(snapshot.credits)
+    setConfig(snapshot.config)
+    setSoul(snapshot.soul)
+    setEnvKeys(snapshot.env.keys || [])
+    setScripts(snapshot.scripts)
+    if (!configTextDirty) {
+      setConfigText(snapshot.config.raw || '')
+    }
+  }, [configTextDirty])
+
+  const refreshNow = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
-      setTasks(await api('/kanban-tasks'))
-      setCronJobs(await api('/cron-jobs'))
-      setPipeline(await api('/pipeline'))
-      setCredits(await api('/credits'))
-      setSoul(await api('/soul-summary'))
-      const cfg = await api('/config')
-      setConfig(cfg)
-      setConfigText(cfg.raw || '')
-    } catch (e) { console.error(e) }
-  }, [])
+      const snapshot = await fetchSnapshot()
+      applySnapshot(snapshot)
+      setError('')
+      if (!silent) setMessage('Dashboard refreshed')
+    } catch (cause) {
+      setError(cause.message)
+    } finally {
+      if (!silent) setLoading(false)
+    }
+  }, [applySnapshot])
 
-  useEffect(() => { load(); const i = setInterval(load, 15000); return () => clearInterval(i) }, [load])
+  useEffect(() => {
+    let cancelled = false
+
+    const tick = () => {
+      fetchSnapshot()
+        .then((snapshot) => {
+          if (!cancelled) {
+            applySnapshot(snapshot)
+            setError('')
+          }
+        })
+        .catch((cause) => {
+          if (!cancelled) setError(cause.message)
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+    }
+
+    const starter = window.setTimeout(tick, 0)
+    const interval = window.setInterval(tick, 15000)
+    return () => {
+      cancelled = true
+      window.clearTimeout(starter)
+      window.clearInterval(interval)
+    }
+  }, [applySnapshot])
+
+  const groupedTasks = useMemo(() => {
+    return COLUMNS.reduce((acc, column) => {
+      acc[column.key] = tasks.filter((task) => task.status === column.key)
+      return acc
+    }, {})
+  }, [tasks])
+
+  const runAction = async (key, action, success) => {
+    setBusyKey(key)
+    setMessage('')
+    setError('')
+    try {
+      const result = await action()
+      setMessage(success)
+      await refreshNow(true)
+      return result
+    } catch (cause) {
+      setError(cause.message)
+      return null
+    } finally {
+      setBusyKey('')
+    }
+  }
 
   const addTask = async () => {
-    if (!newTitle.trim()) return
-    await api('/kanban-tasks', { method: 'POST', body: JSON.stringify({ title: newTitle, status: 'backlog' }) })
-    setNewTitle('')
-    load()
+    const title = newTask.title.trim()
+    if (!title) return
+    await runAction(
+      'add-task',
+      () => api('/kanban-tasks', {
+        method: 'POST',
+        body: JSON.stringify({ title, status: newTask.status, priority: Number(newTask.priority) }),
+      }),
+      'Task added',
+    )
+    setNewTask((current) => ({ ...current, title: '' }))
   }
 
   const moveTask = async (id, status) => {
-    await api('/kanban-tasks/' + id, { method: 'PATCH', body: JSON.stringify({ status }) })
-    load()
+    await runAction(
+      `move-${id}`,
+      () => api('/kanban-tasks/' + id, { method: 'PATCH', body: JSON.stringify({ status }) }),
+      'Task moved',
+    )
   }
 
   const deleteTask = async (id) => {
-    await api('/kanban-tasks/' + id, { method: 'DELETE' })
-    load()
+    await runAction(
+      `delete-${id}`,
+      () => api('/kanban-tasks/' + id, { method: 'DELETE' }),
+      'Task deleted',
+    )
   }
 
   const toggleCron = async (id) => {
-    await api('/cron/' + id + '/toggle', { method: 'POST' })
-    load()
+    await runAction(
+      `cron-${id}`,
+      () => api('/cron/' + id + '/toggle', { method: 'POST' }),
+      'Cron state updated',
+    )
+  }
+
+  const triggerCron = async (id) => {
+    await runAction(
+      `trigger-${id}`,
+      () => api('/cron/' + id + '/trigger', { method: 'POST' }),
+      'Cron trigger requested',
+    )
+  }
+
+  const saveStructuredConfig = async () => {
+    await runAction(
+      'save-config',
+      () => api('/config', {
+        method: 'PUT',
+        body: JSON.stringify({
+          model: config?.model?.default || '',
+          provider: config?.model?.provider || '',
+          base_url: config?.model?.base_url || '',
+          max_turns: Number(config?.agent?.max_turns || 0),
+          temperature: config?.model?.temperature === undefined ? undefined : Number(config.model.temperature),
+        }),
+      }),
+      'Config fields saved',
+    )
+  }
+
+  const saveRawConfig = async () => {
+    await runAction(
+      'save-raw-config',
+      () => api('/config/raw', { method: 'PUT', body: JSON.stringify({ text: configText }) }),
+      'Raw config saved',
+    )
+    setConfigTextDirty(false)
   }
 
   const restartContainer = async () => {
-    await api('/container/restart', { method: 'POST' })
-    setTimeout(load, 5000)
-  }
-
-  const loadLogs = async () => {
-    const l = await api('/container/logs?lines=50')
-    setLogs(l.stdout || l.stderr || 'no logs')
-  }
-
-  const saveConfig = async () => {
-    await api('/config/raw', { method: 'PUT', body: JSON.stringify({ text: configText }) })
-    alert('Config saved. Restart container to apply.')
+    await runAction(
+      'restart-container',
+      () => api('/container/restart', { method: 'POST' }),
+      'Container restart requested',
+    )
   }
 
   const loadContainerInfo = async () => {
-    const c = await api('/container')
-    setContainer(c)
+    const result = await runAction('container-info', () => api('/container'), 'Container snapshot loaded')
+    if (result) setContainer(result)
   }
 
-  const groupByStatus = (status) => tasks.filter(t => t.status === status)
+  const loadLogs = async () => {
+    const result = await runAction('container-logs', () => api('/container/logs?lines=120'), 'Logs loaded')
+    if (result) setLogs(result.stdout || result.stderr || 'no logs')
+  }
+
+  const runScript = async (name) => {
+    const result = await runAction(
+      `script-${name}`,
+      () => api('/scripts/' + encodeURIComponent(name) + '/run', { method: 'POST' }),
+      'Script finished',
+    )
+    if (result) setScriptOutput({ name, result })
+  }
+
+  const activeCredits = Object.values(credits).filter(Boolean).length
+  const cronHealth = overview?.cron?.by_health || {}
+  const taskCounts = overview?.tasks?.by_status || {}
+  const containerStatus = overview?.container?.status || 'unknown'
 
   return (
-    <div className="app">
-      <header>
-        <div className="logo">◈ SAQR</div>
-        <div className="subtitle">Command Center</div>
-        <div className="header-actions">
-          <span className="badge">{cronJobs.filter(j => j.health === 'error').length} errors</span>
-          <span className="badge green">{pipeline?.kourchal?.applied || 0} sent today</span>
+    <div className="app-shell">
+      <header className="topbar">
+        <div>
+          <div className="brand-row">
+            <span className="brand-mark">SAQR</span>
+            <span className={'status-dot ' + statusClass(containerStatus)} />
+          </div>
+          <div className="subtitle">Hermes Agent Command Center</div>
+        </div>
+        <div className="topbar-actions">
+          <span className={'status-pill ' + statusClass(containerStatus)}>{containerStatus}</span>
+          <button onClick={() => refreshNow(false)} disabled={loading || busyKey === 'refresh'}>
+            {loading ? 'Loading' : 'Refresh'}
+          </button>
+          <button className="danger" onClick={restartContainer} disabled={busyKey === 'restart-container'}>
+            Restart
+          </button>
         </div>
       </header>
 
-      <nav>
-        {['kanban', 'config', 'cron', 'pipeline', 'credits', 'container', 'soul'].map(t => (
-          <button key={t} className={tab === t ? 'active' : ''} onClick={() => { setTab(t); if (t === 'container') loadContainerInfo(); if (t === 'logs') loadLogs() }}>
-            {t.charAt(0).toUpperCase() + t.slice(1)}
+      <nav className="tabs" aria-label="Command center sections">
+        {TABS.map((tab) => (
+          <button
+            key={tab.key}
+            className={activeTab === tab.key ? 'active' : ''}
+            onClick={() => {
+              setActiveTab(tab.key)
+              if (tab.key === 'container') void loadContainerInfo()
+            }}
+          >
+            {tab.label}
           </button>
         ))}
       </nav>
 
+      {(message || error) && (
+        <div className={'notice ' + (error ? 'error' : 'ok')}>
+          {error || message}
+        </div>
+      )}
+
       <main>
-        {tab === 'kanban' && (
-          <section>
-            <div className="add-form">
-              <input value={newTitle} onChange={e => setNewTitle(e.target.value)} placeholder="New task..." onKeyDown={e => e.key === 'Enter' && addTask()} />
-              <button onClick={addTask}>+ Add</button>
+        {activeTab === 'overview' && (
+          <section className="page-grid">
+            <div className="metric-card">
+              <span>Container</span>
+              <strong>{containerStatus}</strong>
+              <small>{overview?.generated_at ? `Updated ${formatTime(overview.generated_at)}` : 'Awaiting pulse'}</small>
             </div>
+            <div className="metric-card">
+              <span>Tasks</span>
+              <strong>{overview?.tasks?.total || 0}</strong>
+              <small>{taskCounts.blocked || 0} blocked, {overview?.tasks?.critical || 0} critical</small>
+            </div>
+            <div className="metric-card">
+              <span>Cron</span>
+              <strong>{cronHealth.error || 0}</strong>
+              <small>{cronHealth.ok || 0} ok, {cronHealth.stale || 0} stale</small>
+            </div>
+            <div className="metric-card">
+              <span>Pipeline</span>
+              <strong>{pipeline?.total || 0}</strong>
+              <small>{(pipeline?.mehdi?.applied || 0) + (pipeline?.kourchal?.applied || 0)} applied</small>
+            </div>
+            <div className="metric-card">
+              <span>API Keys</span>
+              <strong>{activeCredits}/{Object.keys(credits).length}</strong>
+              <small>{envKeys.length} env keys visible</small>
+            </div>
+            <div className="metric-card">
+              <span>Model</span>
+              <strong>{overview?.config?.model?.default || '-'}</strong>
+              <small>{overview?.config?.model?.provider || 'provider unset'}</small>
+            </div>
+
+            <div className="panel span-2">
+              <div className="panel-header">
+                <h2>Operations Pulse</h2>
+                <span>{overview?.config?.agent?.max_turns || '-'} max turns</span>
+              </div>
+              <div className="status-grid">
+                {COLUMNS.map((column) => (
+                  <div key={column.key} className="status-cell" style={{ borderColor: column.color }}>
+                    <span>{column.label}</span>
+                    <strong>{taskCounts[column.key] || 0}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="panel">
+              <div className="panel-header">
+                <h2>Cron Faults</h2>
+                <span>{overview?.cron?.total || 0} jobs</span>
+              </div>
+              <div className="stack">
+                {(overview?.cron?.errors || []).length === 0 && <div className="empty">No active cron errors</div>}
+                {(overview?.cron?.errors || []).map((job) => (
+                  <div className="row-card" key={job.id || job.name}>
+                    <strong>{job.name || job.id}</strong>
+                    <span className="status-pill error">error</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="panel">
+              <div className="panel-header">
+                <h2>Recent Pipeline</h2>
+                <span>{pipeline?.total || 0} leads</span>
+              </div>
+              <div className="stack">
+                {(pipeline?.recent || []).slice().reverse().map((job, index) => (
+                  <div className="row-card" key={`${job.company || 'company'}-${index}`}>
+                    <div>
+                      <strong>{job.company || 'Unknown company'}</strong>
+                      <span>{job.title || 'Untitled role'}</span>
+                    </div>
+                    <span className={'status-pill ' + statusClass(job.status)}>{job.status || 'new'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="panel span-2">
+              <div className="panel-header">
+                <h2>Credential Surface</h2>
+                <span>{activeCredits} active</span>
+              </div>
+              <div className="chip-grid">
+                {Object.entries(credits).map(([key, value]) => (
+                  <span key={key} className={'chip ' + (value ? 'on' : 'off')}>
+                    {key}: {value ? 'active' : 'missing'}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {activeTab === 'kanban' && (
+          <section>
+            <div className="toolbar">
+              <input
+                value={newTask.title}
+                onChange={(event) => setNewTask((current) => ({ ...current, title: event.target.value }))}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void addTask()
+                }}
+                placeholder="New task"
+              />
+              <select
+                value={newTask.status}
+                onChange={(event) => setNewTask((current) => ({ ...current, status: event.target.value }))}
+              >
+                {COLUMNS.map((column) => <option key={column.key} value={column.key}>{column.label}</option>)}
+              </select>
+              <select
+                value={newTask.priority}
+                onChange={(event) => setNewTask((current) => ({ ...current, priority: Number(event.target.value) }))}
+              >
+                <option value={0}>Normal</option>
+                <option value={1}>High</option>
+                <option value={2}>Critical</option>
+              </select>
+              <button onClick={addTask} disabled={busyKey === 'add-task'}>Add</button>
+            </div>
+
             <div className="kanban">
-              {COLUMNS.map(col => (
-                <div key={col.key} className="kanban-col" onDragOver={e => e.preventDefault()} onDrop={e => {
-                  e.preventDefault()
-                  const id = e.dataTransfer.getData('text/plain')
-                  moveTask(id, col.key)
-                }}>
-                  <div className="col-header" style={{ borderLeftColor: col.color }}>
-                    <span>{col.label}</span>
-                    <span className="count">{groupByStatus(col.key).length}</span>
+              {COLUMNS.map((column) => (
+                <div
+                  key={column.key}
+                  className="kanban-col"
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    const id = event.dataTransfer.getData('text/plain')
+                    if (id) void moveTask(id, column.key)
+                  }}
+                >
+                  <div className="col-header" style={{ borderLeftColor: column.color }}>
+                    <span>{column.label}</span>
+                    <strong>{groupedTasks[column.key]?.length || 0}</strong>
                   </div>
                   <div className="col-body">
-                    {groupByStatus(col.key).map(t => (
-                      <div key={t.id} className="card" draggable onDragStart={e => e.dataTransfer.setData('text/plain', t.id)}>
-                        <div className="card-title">{t.title}</div>
-                        {t.body && <div className="card-body">{t.body}</div>}
-                        <div className="card-actions">
-                          {t.priority > 0 && <span className={'pri pri-' + t.priority}>{['', 'High', 'Critical'][t.priority]}</span>}
-                          <button className="del" onClick={() => deleteTask(t.id)}>×</button>
+                    {(groupedTasks[column.key] || []).map((task) => (
+                      <article
+                        key={task.id}
+                        className="task-card"
+                        draggable
+                        onDragStart={(event) => event.dataTransfer.setData('text/plain', task.id)}
+                      >
+                        <div className="task-title">{task.title}</div>
+                        {task.body && <p>{task.body}</p>}
+                        <div className="task-meta">
+                          {task.priority > 0 && <span className={'priority p' + task.priority}>{task.priority === 2 ? 'Critical' : 'High'}</span>}
+                          {task.assignee && <span>{task.assignee}</span>}
+                          <button onClick={() => deleteTask(task.id)} disabled={busyKey === `delete-${task.id}`}>Delete</button>
                         </div>
-                      </div>
+                      </article>
                     ))}
-                    {groupByStatus(col.key).length === 0 && <div className="empty">Drop tasks here</div>}
+                    {(groupedTasks[column.key] || []).length === 0 && <div className="empty">Drop tasks here</div>}
                   </div>
                 </div>
               ))}
@@ -145,54 +492,28 @@ function App() {
           </section>
         )}
 
-        {tab === 'config' && (
-          <section>
-            <h2>LLM Configuration</h2>
-            <div className="config-grid">
-              <div className="config-card">
-                <label>Model</label>
-                <input value={config?.model?.default || ''} onChange={e => setConfig(prev => ({ ...prev, model: { ...prev?.model, default: e.target.value } }))} />
-              </div>
-              <div className="config-card">
-                <label>Provider</label>
-                <input value={config?.model?.provider || ''} onChange={e => setConfig(prev => ({ ...prev, model: { ...prev?.model, provider: e.target.value } }))} />
-              </div>
-              <div className="config-card">
-                <label>Base URL</label>
-                <input value={config?.model?.base_url || ''} onChange={e => setConfig(prev => ({ ...prev, model: { ...prev?.model, base_url: e.target.value } }))} />
-              </div>
-              <div className="config-card">
-                <label>Max Turns</label>
-                <input type="number" value={config?.agent?.max_turns || 90} onChange={e => setConfig(prev => ({ ...prev, agent: { ...prev?.agent, max_turns: parseInt(e.target.value) } }))} />
-              </div>
+        {activeTab === 'cron' && (
+          <section className="panel">
+            <div className="panel-header">
+              <h2>Cron Jobs</h2>
+              <span>{cronJobs.length} tracked</span>
             </div>
-            <button onClick={saveConfig} className="btn-primary">Save Config</button>
-            <button onClick={restartContainer} className="btn-warn" style={{ marginLeft: 8 }}>Restart Container</button>
-
-            <h3 style={{ marginTop: 24 }}>Raw YAML</h3>
-            <textarea value={configText} onChange={e => setConfigText(e.target.value)} rows={15} style={{ width: '100%', fontFamily: 'monospace', fontSize: 12, background: '#111', color: '#e2e8f0', border: '1px solid #333', borderRadius: 6, padding: 12 }} />
-            <button onClick={saveConfig} className="btn-primary" style={{ marginTop: 8 }}>Save Raw</button>
-          </section>
-        )}
-
-        {tab === 'cron' && (
-          <section>
-            <h2>Cron Jobs</h2>
-            <table className="cron-table">
+            <table>
               <thead>
                 <tr><th>Job</th><th>Schedule</th><th>Health</th><th>Last Run</th><th>Actions</th></tr>
               </thead>
               <tbody>
-                {cronJobs.map(j => (
-                  <tr key={j.id}>
-                    <td><strong>{j.name}</strong></td>
-                    <td><code>{j.schedule?.expr || '-'}</code></td>
-                    <td><span className={'health ' + j.health}>{j.health}</span></td>
-                    <td className="muted">{j.last_run_at ? new Date(j.last_run_at).toLocaleString() : '-'}</td>
-                    <td>
-                      <button className={'btn-small ' + (j.enabled ? 'btn-green' : 'btn-gray')} onClick={() => toggleCron(j.id)}>
-                        {j.enabled ? 'Enabled' : 'Disabled'}
+                {cronJobs.map((job) => (
+                  <tr key={job.id}>
+                    <td><strong>{job.name}</strong></td>
+                    <td><code>{job.schedule?.expr || '-'}</code></td>
+                    <td><span className={'status-pill ' + statusClass(job.health)}>{job.health}</span></td>
+                    <td>{formatTime(job.last_run_at)}</td>
+                    <td className="table-actions">
+                      <button onClick={() => toggleCron(job.id)} disabled={busyKey === `cron-${job.id}`}>
+                        {job.enabled ? 'Pause' : 'Enable'}
                       </button>
+                      <button onClick={() => triggerCron(job.id)} disabled={busyKey === `trigger-${job.id}`}>Trigger</button>
                     </td>
                   </tr>
                 ))}
@@ -201,90 +522,196 @@ function App() {
           </section>
         )}
 
-        {tab === 'pipeline' && (
-          <section>
-            <h2>Job Pipeline</h2>
-            <div className="stats-row">
-              <div className="stat-card">
-                <div className="num">{pipeline?.mehdi?.total || 0}</div>
-                <div className="label">Mehdi Leads</div>
+        {activeTab === 'pipeline' && (
+          <section className="page-grid">
+            {['mehdi', 'kourchal'].map((profile) => (
+              <div className="panel" key={profile}>
+                <div className="panel-header">
+                  <h2>{profile === 'mehdi' ? 'Mehdi' : 'Mohammed'}</h2>
+                  <span>{pipeline?.[profile]?.total || 0} leads</span>
+                </div>
+                <div className="status-grid two">
+                  <div className="status-cell">
+                    <span>Total</span>
+                    <strong>{pipeline?.[profile]?.total || 0}</strong>
+                  </div>
+                  <div className="status-cell">
+                    <span>Applied</span>
+                    <strong>{pipeline?.[profile]?.applied || 0}</strong>
+                  </div>
+                </div>
               </div>
-              <div className="stat-card">
-                <div className="num">{pipeline?.mehdi?.applied || 0}</div>
-                <div className="label">Mehdi Applied</div>
+            ))}
+            <div className="panel span-2">
+              <div className="panel-header">
+                <h2>Recent Leads</h2>
+                <span>{pipeline?.total || 0} total</span>
               </div>
-              <div className="stat-card">
-                <div className="num">{pipeline?.kourchal?.total || 0}</div>
-                <div className="label">Mohammed Leads</div>
-              </div>
-              <div className="stat-card">
-                <div className="num">{pipeline?.kourchal?.applied || 0}</div>
-                <div className="label">Mohammed Applied</div>
-              </div>
-            </div>
-            {pipeline?.recent && (
-              <>
-                <h3>Recent</h3>
-                {pipeline.recent.slice().reverse().map((j, i) => (
-                  <div key={i} className="job-item">
-                    <strong>{j.company}</strong> — {j.title}
-                    <span className={'tag ' + j.status}>{j.status}</span>
+              <div className="stack">
+                {(pipeline?.recent || []).slice().reverse().map((job, index) => (
+                  <div className="row-card" key={`${job.company || 'company'}-${job.title || 'role'}-${index}`}>
+                    <div>
+                      <strong>{job.company || '-'}</strong>
+                      <span>{job.title || '-'}</span>
+                    </div>
+                    <span className={'status-pill ' + statusClass(job.status)}>{job.status || 'new'}</span>
                   </div>
                 ))}
-              </>
-            )}
-          </section>
-        )}
-
-        {tab === 'credits' && (
-          <section>
-            <h2>API Credits</h2>
-            <div className="credits-grid">
-              {Object.entries(credits).map(([k, v]) => (
-                <div key={k} className="credit-card">
-                  <div className="key-name">{k}</div>
-                  <div className={'key-status ' + (v ? 'active' : 'inactive')}>{v ? '✓ Active' : '✗ Missing'}</div>
-                </div>
-              ))}
+              </div>
             </div>
           </section>
         )}
 
-        {tab === 'container' && (
-          <section>
-            <h2>Container</h2>
-            <button onClick={loadContainerInfo} className="btn-primary">Refresh</button>
-            <button onClick={restartContainer} className="btn-warn" style={{ marginLeft: 8 }}>Restart Container</button>
-            <button onClick={loadLogs} className="btn-gray" style={{ marginLeft: 8 }}>Load Logs</button>
-            {container && (
-              <pre className="log-box">
-                {JSON.stringify(container, null, 2)}
-              </pre>
-            )}
-            {logs && (
-              <>
-                <h3 style={{ marginTop: 16 }}>Recent Logs</h3>
-                <pre className="log-box">{logs}</pre>
-              </>
-            )}
+        {activeTab === 'config' && (
+          <section className="page-grid">
+            <div className="panel span-2">
+              <div className="panel-header">
+                <h2>LLM Configuration</h2>
+                <button onClick={saveStructuredConfig} disabled={busyKey === 'save-config'}>Save Fields</button>
+              </div>
+              <div className="form-grid">
+                <label>
+                  Model
+                  <input value={config?.model?.default || ''} onChange={(event) => setConfig((current) => ({ ...current, model: { ...current?.model, default: event.target.value } }))} />
+                </label>
+                <label>
+                  Provider
+                  <input value={config?.model?.provider || ''} onChange={(event) => setConfig((current) => ({ ...current, model: { ...current?.model, provider: event.target.value } }))} />
+                </label>
+                <label>
+                  Base URL
+                  <input value={config?.model?.base_url || ''} onChange={(event) => setConfig((current) => ({ ...current, model: { ...current?.model, base_url: event.target.value } }))} />
+                </label>
+                <label>
+                  Max Turns
+                  <input type="number" min="1" value={config?.agent?.max_turns || ''} onChange={(event) => setConfig((current) => ({ ...current, agent: { ...current?.agent, max_turns: Number(event.target.value) } }))} />
+                </label>
+                <label>
+                  Temperature
+                  <input type="number" step="0.1" value={config?.model?.temperature ?? ''} onChange={(event) => setConfig((current) => ({ ...current, model: { ...current?.model, temperature: event.target.value } }))} />
+                </label>
+              </div>
+            </div>
+            <div className="panel span-2">
+              <div className="panel-header">
+                <h2>Raw YAML</h2>
+                <div className="table-actions">
+                  <button onClick={saveRawConfig} disabled={busyKey === 'save-raw-config'}>Save Raw</button>
+                  <button className="danger" onClick={restartContainer} disabled={busyKey === 'restart-container'}>Restart</button>
+                </div>
+              </div>
+              <textarea
+                value={configText}
+                onChange={(event) => {
+                  setConfigText(event.target.value)
+                  setConfigTextDirty(true)
+                }}
+                spellCheck="false"
+              />
+            </div>
           </section>
         )}
 
-        {tab === 'soul' && (
-          <section>
-            <h2>Missions</h2>
-            {soul?.missions?.map((m, i) => (
-              <div key={i} className="mission-item">P{i + 1}: {m}</div>
-            ))}
-            <h3 style={{ marginTop: 24 }}>Cron Schedule</h3>
-            <table className="cron-table">
-              <thead><tr><th>Time</th><th>Job</th><th>Profile</th><th>Deliver</th></tr></thead>
-              <tbody>
-                {soul?.schedule?.map((s, i) => (
-                  <tr key={i}><td>{s.time}</td><td><strong>{s.job}</strong></td><td>{s.profile}</td><td>{s.deliver}</td></tr>
+        {activeTab === 'scripts' && (
+          <section className="page-grid">
+            <div className="panel span-2">
+              <div className="panel-header">
+                <h2>Agent Scripts</h2>
+                <span>{scripts.length} runnable</span>
+              </div>
+              <table>
+                <thead>
+                  <tr><th>Name</th><th>Size</th><th>Modified</th><th>Action</th></tr>
+                </thead>
+                <tbody>
+                  {scripts.map((script) => (
+                    <tr key={script.name}>
+                      <td><strong>{script.name}</strong></td>
+                      <td>{formatBytes(script.size)}</td>
+                      <td>{formatTime(script.modified)}</td>
+                      <td><button onClick={() => runScript(script.name)} disabled={busyKey === `script-${script.name}`}>Run</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="panel">
+              <div className="panel-header">
+                <h2>Environment Keys</h2>
+                <span>{envKeys.length}</span>
+              </div>
+              <div className="chip-grid">
+                {envKeys.map((key) => <span className="chip" key={key}>{key}</span>)}
+              </div>
+            </div>
+            <div className="panel">
+              <div className="panel-header">
+                <h2>Script Output</h2>
+                <span>{scriptOutput?.name || '-'}</span>
+              </div>
+              <pre className="log-box">{scriptOutput ? (scriptOutput.result.stdout || scriptOutput.result.stderr || JSON.stringify(scriptOutput.result, null, 2)) : 'No script output'}</pre>
+            </div>
+          </section>
+        )}
+
+        {activeTab === 'container' && (
+          <section className="page-grid">
+            <div className="panel span-2">
+              <div className="panel-header">
+                <h2>Container Control</h2>
+                <div className="table-actions">
+                  <button onClick={loadContainerInfo} disabled={busyKey === 'container-info'}>Inspect</button>
+                  <button onClick={loadLogs} disabled={busyKey === 'container-logs'}>Logs</button>
+                  <button className="danger" onClick={restartContainer} disabled={busyKey === 'restart-container'}>Restart</button>
+                </div>
+              </div>
+              <pre className="log-box">{container ? JSON.stringify(container, null, 2) : 'No container snapshot loaded'}</pre>
+            </div>
+            <div className="panel span-2">
+              <div className="panel-header">
+                <h2>Recent Logs</h2>
+                <span>tail 120</span>
+              </div>
+              <pre className="log-box tall">{logs || 'No logs loaded'}</pre>
+            </div>
+          </section>
+        )}
+
+        {activeTab === 'soul' && (
+          <section className="page-grid">
+            <div className="panel">
+              <div className="panel-header">
+                <h2>Missions</h2>
+                <span>{soul?.missions?.length || 0}</span>
+              </div>
+              <div className="stack">
+                {(soul?.missions || []).map((mission, index) => (
+                  <div className="row-card" key={`${mission}-${index}`}>
+                    <strong>P{index + 1}</strong>
+                    <span>{mission}</span>
+                  </div>
                 ))}
-              </tbody>
-            </table>
+              </div>
+            </div>
+            <div className="panel">
+              <div className="panel-header">
+                <h2>Schedule</h2>
+                <span>{soul?.schedule?.length || 0}</span>
+              </div>
+              <table>
+                <thead><tr><th>Time</th><th>Job</th><th>Profile</th><th>Deliver</th></tr></thead>
+                <tbody>
+                  {(soul?.schedule || []).map((item, index) => (
+                    <tr key={`${item.time}-${item.job}-${index}`}>
+                      <td>{item.time}</td>
+                      <td><strong>{item.job}</strong></td>
+                      <td>{item.profile}</td>
+                      <td>{item.deliver}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </section>
         )}
       </main>
