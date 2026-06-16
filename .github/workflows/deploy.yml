@@ -1,4 +1,4 @@
-name: Deploy SAQR Command Center
+name: Build SAQR Command Center
 
 on:
   push:
@@ -34,26 +34,3 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ vars.VPS_HOST }}
-          username: ${{ vars.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            set -e
-            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker pull ${{ env.REGISTRY }}/${{ github.repository }}:latest
-            systemctl stop saqr-dashboard 2>/dev/null || true
-            systemctl disable saqr-dashboard 2>/dev/null || true
-            docker compose -f /root/docker-compose.yml up -d saqr
-            docker image prune -f
-            docker logout ghcr.io
-            echo "Deploy complete at $(date)"
