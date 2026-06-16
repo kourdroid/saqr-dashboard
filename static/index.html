@@ -396,12 +396,12 @@ async function loadPipeline() {
   const data = await api('/pipeline');
   document.getElementById('mehdiPipeline').innerHTML = `
     <div class="stats-row" style="grid-template-columns:1fr 1fr;">
-      <div class="stat-card blue"><div class="num">${data.mehdi.count}</div><div class="label">Total Leads</div></div>
+      <div class="stat-card blue"><div class="num">${data.mehdi.total}</div><div class="label">Total Leads</div></div>
       <div class="stat-card green"><div class="num">${data.mehdi.applied}</div><div class="label">Applied</div></div>
     </div>`;
   document.getElementById('kourchalPipeline').innerHTML = `
     <div class="stats-row" style="grid-template-columns:1fr 1fr;">
-      <div class="stat-card blue"><div class="num">${data.kourchal.count}</div><div class="label">Total Leads</div></div>
+      <div class="stat-card blue"><div class="num">${data.kourchal.total}</div><div class="label">Total Leads</div></div>
       <div class="stat-card green"><div class="num">${data.kourchal.applied}</div><div class="label">Applied</div></div>
     </div>`;
 }
