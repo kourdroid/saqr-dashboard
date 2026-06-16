@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { api } from '../lib/api.js';
 
 export default function TaskDrawer({ taskId, onClose }) {
   const [task, setTask] = useState(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [expandedRuns, setExpandedRuns] = useState({});
 
@@ -14,15 +14,10 @@ export default function TaskDrawer({ taskId, onClose }) {
 
     const fetchTaskDetail = async () => {
       try {
-        const res = await fetch(`/api/kanban-tasks/${taskId}`);
-        if (!res.ok) {
-          throw new Error(`Failed to load task details (status: ${res.status})`);
-        }
-        const data = await res.json();
+        const data = await api(`/kanban-tasks/${taskId}`);
         
         if (active) {
           setTask(data);
-          setLoading(false);
           setError(null);
 
           // Auto-refresh every 3s if task is ready/in_progress/in-progress
@@ -41,12 +36,10 @@ export default function TaskDrawer({ taskId, onClose }) {
       } catch (err) {
         if (active) {
           setError(err.message);
-          setLoading(false);
         }
       }
     };
 
-    setLoading(true);
     fetchTaskDetail();
 
     return () => {
@@ -77,12 +70,14 @@ export default function TaskDrawer({ taskId, onClose }) {
     }));
   };
 
+  const loading = !task && !error;
+
   const parsePayload = (payload) => {
     if (!payload) return null;
     try {
       const parsed = typeof payload === 'string' ? JSON.parse(payload) : payload;
       return JSON.stringify(parsed, null, 2);
-    } catch (e) {
+    } catch {
       return payload.toString();
     }
   };
@@ -91,7 +86,7 @@ export default function TaskDrawer({ taskId, onClose }) {
     if (!start || !end) return null;
     const startTime = new Date(start);
     const endTime = new Date(end);
-    if (isNaN(startTime) || !isNaN(endTime)) {
+    if (!Number.isNaN(startTime.getTime()) && !Number.isNaN(endTime.getTime())) {
       const diffMs = endTime - startTime;
       if (diffMs < 0) return null;
       const secs = Math.round(diffMs / 1000);

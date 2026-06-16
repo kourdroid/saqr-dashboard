@@ -1,44 +1,47 @@
 import { useEffect, useState } from 'react'
 
-function formatUptime() {
-  // We approximate uptime from when the page was loaded
-  return null
-}
-
 const TAB_ICONS = {
-  overview:  '◈',
-  kanban:    '⊞',
-  cron:      '⏱',
-  pipeline:  '↑',
-  config:    '⚙',
-  scripts:   '▶',
+  overview: '●',
+  chat: '↯',
+  kanban: '⊞',
+  cron: '⏱',
+  pipeline: '↑',
+  config: '⚙',
+  scripts: '▶',
   container: '⬡',
-  soul:      '◎',
+  soul: '◎',
 }
 
-export default function Topbar({ overview, loading, busyKey, activeTab, tabs, onRefresh, onRestart, onTabChange }) {
-  const [tick, setTick] = useState(0)
-  const [pageLoadTime] = useState(() => Date.now())
+export default function Topbar({
+  overview,
+  loading,
+  busyKey,
+  activeTab,
+  tabs,
+  onRefresh,
+  onRestart,
+  onTabChange,
+  apiToken,
+  onApiTokenChange,
+}) {
+  const [uptimeSecs, setUptimeSecs] = useState(0)
   const containerStatus = overview?.container?.status || 'unknown'
   const statusCls = containerStatus.replaceAll('_', '-')
 
-  // Tick every second for uptime display
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1000)
+    const id = setInterval(() => setUptimeSecs((value) => value + 1), 1000)
     return () => clearInterval(id)
   }, [])
 
-  const uptimeSecs = Math.floor((Date.now() - pageLoadTime) / 1000)
   const h = Math.floor(uptimeSecs / 3600)
   const m = Math.floor((uptimeSecs % 3600) / 60)
   const s = uptimeSecs % 60
   const uptimeStr = h > 0
-    ? `${h}h ${m.toString().padStart(2,'0')}m`
-    : `${m}m ${s.toString().padStart(2,'0')}s`
+    ? `${h}h ${m.toString().padStart(2, '0')}m`
+    : `${m}m ${s.toString().padStart(2, '0')}s`
 
   return (
     <>
-      {/* ── Header bar ── */}
       <header className="topbar">
         <div className="brand-col">
           <div className="brand-row">
@@ -50,15 +53,18 @@ export default function Topbar({ overview, loading, busyKey, activeTab, tabs, on
         </div>
 
         <div className="topbar-actions">
+          <input
+            aria-label="SAQR API token"
+            className="token-input"
+            type="password"
+            value={apiToken}
+            onChange={(event) => onApiTokenChange(event.target.value)}
+            placeholder="SAQR token"
+            title="Stored locally and sent as a Bearer token"
+          />
           <span className={`status-pill ${statusCls}`}>{containerStatus}</span>
-          <button
-            onClick={onRefresh}
-            disabled={loading}
-            title="Refresh all data"
-          >
-            {loading
-              ? <><span style={{ display:'inline-block',width:12,height:12,border:'2px solid rgba(255,255,255,0.2)',borderTopColor:'var(--accent)',borderRadius:'50%',animation:'spin 0.7s linear infinite',marginRight:6,verticalAlign:'middle' }} />Loading</>
-              : '↺ Refresh'}
+          <button onClick={onRefresh} disabled={loading} title="Refresh all data">
+            {loading ? 'Loading' : '↻ Refresh'}
           </button>
           <button
             className="danger"
@@ -71,7 +77,6 @@ export default function Topbar({ overview, loading, busyKey, activeTab, tabs, on
         </div>
       </header>
 
-      {/* ── Tab bar ── */}
       <nav className="tabs" aria-label="Command center sections">
         {tabs.map((tab) => (
           <button

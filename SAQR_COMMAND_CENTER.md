@@ -157,3 +157,13 @@ Executes Python/bash scripts from `saqr/scripts/`.
 - **Service**: `saqr-dashboard.service` (systemd, runs as root)
 - **Startup**: `ExecStart=/usr/bin/python3 /root/saqr-dashboard/main.py`
 - **Auto-deploy**: Webhook endpoint + `deploy.sh` syncs git, rebuilds frontend, restarts service
+
+### Required Security Environment
+
+Set these variables in the service or Docker Compose environment:
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `SAQR_AUTH_TOKEN` | Yes | Bearer token required for all protected `/api/*` routes. The frontend stores it locally and sends it as `Authorization: Bearer ...`. |
+| `SAQR_ALLOWED_SCRIPTS` | Recommended | Comma-separated allowlist of script filenames that may be run from `saqr/scripts/`. Scripts not listed are visible but locked. |
+| `SAQR_ALLOW_UNAUTHENTICATED=1` | Local dev only | Disables API auth. Do not set this on `cmd.kaliits.cloud` or any public reverse proxy. |

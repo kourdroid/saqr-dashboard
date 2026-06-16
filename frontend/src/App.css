@@ -173,6 +173,17 @@ button, input, select, textarea {
   flex-wrap: wrap;
 }
 
+.token-input {
+  width: 180px;
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
 /* ── Status Dot ── */
 
 .status-dot {
