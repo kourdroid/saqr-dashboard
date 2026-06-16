@@ -63,7 +63,7 @@ class TaskCreate(BaseModel):
     body: str = ""
     status: str = "backlog"
     priority: int = 0
-    assignee: str = ""
+    assignee: str = "default"
 
 
 class TaskUpdate(BaseModel):
@@ -231,6 +231,7 @@ def add_kanban_task(task: TaskCreate) -> str:
     validate_task_create(task)
     task_id = uuid.uuid4().hex[:12]
     now = int(time.time())
+    assignee = task.assignee.strip() if task.assignee else "default"
     ensure_kanban_schema()
     with sqlite3.connect(str(KANBAN_DB)) as conn:
         conn.execute(
@@ -244,7 +245,7 @@ def add_kanban_task(task: TaskCreate) -> str:
                 task.body,
                 task.status,
                 task.priority,
-                task.assignee,
+                assignee,
                 now,
             ),
         )
@@ -266,6 +267,8 @@ def update_kanban_task(task_id: str, update: TaskUpdate) -> None:
         fields["started_at"] = now
     elif fields.get("status") == "done":
         fields["completed_at"] = now
+    if "assignee" in fields and not fields["assignee"]:
+        fields["assignee"] = "default"
 
     columns = ", ".join(f"{key}=?" for key in fields)
     ensure_kanban_schema()
