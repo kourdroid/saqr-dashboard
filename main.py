@@ -390,6 +390,7 @@ def run_script(name: str):
 # ── Webhook ──
 WEBHOOK_SECRET = "fc98c9ca6e57ce5bc07e07323724c252"
 
+@app.post("/")
 @app.post("/webhook")
 async def webhook(request: Request):
     body = await request.body()
