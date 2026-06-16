@@ -51,6 +51,8 @@ jobs:
             set -e
             echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             docker pull ${{ env.REGISTRY }}/${{ github.repository }}:latest
+            systemctl stop saqr-dashboard 2>/dev/null || true
+            systemctl disable saqr-dashboard 2>/dev/null || true
             docker compose -f /root/docker-compose.yml up -d saqr
             docker image prune -f
             docker logout ghcr.io

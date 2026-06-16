@@ -13,6 +13,10 @@ echo "$GHCR_PAT" | docker login ghcr.io -u kourdroid --password-stdin
 echo "Pulling $IMAGE..."
 docker pull "$IMAGE"
 
+echo "Stopping old systemd service..."
+systemctl stop saqr-dashboard 2>/dev/null || true
+systemctl disable saqr-dashboard 2>/dev/null || true
+
 echo "Recreating saqr service..."
 docker compose -f /root/docker-compose.yml up -d saqr
 
