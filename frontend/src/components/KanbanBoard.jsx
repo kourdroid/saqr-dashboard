@@ -8,14 +8,15 @@ const COLUMNS = [
   { key: 'done',        label: 'Done',         color: '#22d47a' },
 ]
 
-export default function KanbanBoard({ tasks, busyKey, onAdd, onMove, onDelete }) {
+export default function KanbanBoard({ tasks = [], busyKey, onAdd, onMove, onDelete, onCardClick }) {
   const [newTask, setNewTask] = useState({ title: '', status: 'backlog', priority: 0 })
   const [dragOverCol, setDragOverCol] = useState(null)
-
-  const grouped = COLUMNS.reduce((acc, col) => {
-    acc[col.key] = tasks.filter((t) => t.status === col.key)
-    return acc
-  }, {})
+  
+  // Search & Filter state
+  const [searchQuery, setSearchQuery] = useState('')
+  const [columnFilter, setColumnFilter] = useState('all')
+  const [priorityFilter, setPriorityFilter] = useState('all')
+  const [assigneeFilter, setAssigneeFilter] = useState('all')
 
   const handleAdd = () => {
     const title = newTask.title.trim()
@@ -24,9 +25,37 @@ export default function KanbanBoard({ tasks, busyKey, onAdd, onMove, onDelete })
     setNewTask((p) => ({ ...p, title: '' }))
   }
 
+  // Extract unique assignees dynamically for filter
+  const assignees = Array.from(
+    new Set(tasks.map((t) => t.assignee).filter(Boolean))
+  )
+
+  // Filter tasks based on query variables
+  const filteredTasks = tasks.filter((task) => {
+    const matchesSearch = 
+      task.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+      (task.body && task.body.toLowerCase().includes(searchQuery.toLowerCase())) ||
+      task.id.toLowerCase().includes(searchQuery.toLowerCase())
+    
+    const matchesPriority = priorityFilter === 'all' || task.priority === Number(priorityFilter)
+    const matchesAssignee = assigneeFilter === 'all' || task.assignee === assigneeFilter
+    
+    return matchesSearch && matchesPriority && matchesAssignee
+  })
+
+  // Filter columns to display based on status filter selection
+  const activeColumns = columnFilter === 'all' 
+    ? COLUMNS 
+    : COLUMNS.filter((col) => col.key === columnFilter)
+
+  const grouped = activeColumns.reduce((acc, col) => {
+    acc[col.key] = filteredTasks.filter((t) => t.status === col.key)
+    return acc
+  }, {})
+
   return (
     <section className="page-section">
-      {/* Toolbar */}
+      {/* Add Task Toolbar */}
       <div className="panel" style={{ marginBottom: 12 }}>
         <div className="toolbar">
           <input
@@ -61,9 +90,53 @@ export default function KanbanBoard({ tasks, busyKey, onAdd, onMove, onDelete })
         </div>
       </div>
 
+      {/* Search & Filter Bar */}
+      <div className="panel" style={{ marginBottom: 12 }}>
+        <div className="search-filter-bar">
+          <div className="search-input-wrap">
+            <span className="search-icon-inside">🔍</span>
+            <input
+              type="text"
+              placeholder="Search by title, body description, or ID..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+          </div>
+          <div className="filter-selects">
+            <select
+              value={columnFilter}
+              onChange={(e) => setColumnFilter(e.target.value)}
+            >
+              <option value="all">All Columns</option>
+              {COLUMNS.map((col) => (
+                <option key={col.key} value={col.key}>{col.label}</option>
+              ))}
+            </select>
+            <select
+              value={priorityFilter}
+              onChange={(e) => setPriorityFilter(e.target.value)}
+            >
+              <option value="all">All Priorities</option>
+              <option value={0}>Normal Priority</option>
+              <option value={1}>High Priority</option>
+              <option value={2}>Critical Priority</option>
+            </select>
+            <select
+              value={assigneeFilter}
+              onChange={(e) => setAssigneeFilter(e.target.value)}
+            >
+              <option value="all">All Assignees</option>
+              {assignees.map((assignee) => (
+                <option key={assignee} value={assignee}>{assignee}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+
       {/* Board */}
       <div className="kanban">
-        {COLUMNS.map((col) => (
+        {activeColumns.map((col) => (
           <div
             key={col.key}
             className={`kanban-col${dragOverCol === col.key ? ' drag-over' : ''}`}
@@ -87,10 +160,11 @@ export default function KanbanBoard({ tasks, busyKey, onAdd, onMove, onDelete })
                   task={task}
                   busyKey={busyKey}
                   onDelete={onDelete}
+                  onCardClick={onCardClick}
                 />
               ))}
               {(grouped[col.key] || []).length === 0 && (
-                <div className="empty" style={{ marginTop: 4 }}>Drop here</div>
+                <div className="empty" style={{ marginTop: 4 }}>No Tasks</div>
               )}
             </div>
           </div>
@@ -100,8 +174,21 @@ export default function KanbanBoard({ tasks, busyKey, onAdd, onMove, onDelete })
   )
 }
 
-function TaskCard({ task, busyKey, onDelete }) {
+function TaskCard({ task, busyKey, onDelete, onCardClick }) {
   const [dragging, setDragging] = useState(false)
+
+  const formatCompletedTime = (timeStr) => {
+    if (!timeStr) return '';
+    const d = new Date(timeStr);
+    if (isNaN(d.getTime())) return '';
+    const seconds = Math.floor((new Date() - d) / 1000);
+    if (seconds < 60) return 'just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return d.toLocaleDateString();
+  };
 
   return (
     <article
@@ -109,6 +196,8 @@ function TaskCard({ task, busyKey, onDelete }) {
       draggable
       onDragStart={(e) => { e.dataTransfer.setData('text/plain', task.id); setDragging(true) }}
       onDragEnd={() => setDragging(false)}
+      onClick={() => onCardClick && onCardClick(task.id)}
+      style={{ cursor: 'pointer' }}
     >
       {task.priority > 0 && (
         <span className={`priority p${task.priority}`} style={{ marginBottom: 6, display: 'inline-flex' }}>
@@ -116,12 +205,22 @@ function TaskCard({ task, busyKey, onDelete }) {
         </span>
       )}
       <div className="task-title">{task.title}</div>
-      {task.body && <div className="task-body">{task.body}</div>}
+      {task.body && <div className="task-body" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{task.body}</div>}
+      
+      {task.status === 'done' && task.completed_at && (
+        <div style={{ fontSize: '10px', color: 'var(--green)', marginTop: '6px' }}>
+          ✓ Done {formatCompletedTime(task.completed_at)}
+        </div>
+      )}
+
       <div className="task-meta">
         {task.assignee && <span className="task-assignee">👤 {task.assignee}</span>}
         <button
           className="danger"
-          onClick={() => onDelete(task.id)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(task.id);
+          }}
           disabled={busyKey === `delete-${task.id}`}
           title="Delete task"
         >

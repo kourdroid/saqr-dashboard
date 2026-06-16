@@ -1,3 +1,5 @@
+import ActivityFeed from './ActivityFeed'
+
 function formatTime(value) {
   if (!value) return '-'
   return new Date(value).toLocaleString()
@@ -23,12 +25,41 @@ const COLUMNS = [
   { key: 'done',       label: 'Done' },
 ]
 
-export default function OverviewPage({ overview, tasks, pipeline, credits, cronJobs, envKeys }) {
+export default function OverviewPage({ overview, tasks = [], pipeline, credits, cronJobs, envKeys, activities = [], onActivityClick }) {
   const containerStatus = overview?.container?.status || 'unknown'
   const taskCounts = overview?.tasks?.by_status || {}
   const cronHealth = overview?.cron?.by_health || {}
   const activeCredits = Object.values(credits || {}).filter(Boolean).length
   const totalCredits = Object.keys(credits || {}).length
+
+  // Calculate Performance Stats from tasks list
+  const activeNow = tasks.filter(t => t.status === 'in_progress' || t.status === 'in-progress' || t.status === 'ready').length
+  
+  const now = new Date()
+  const oneDayAgo = now.getTime() - 24 * 60 * 60 * 1000
+  const tasksToday = tasks.filter(t => t.created_at && new Date(t.created_at).getTime() > oneDayAgo).length
+
+  const doneCount = tasks.filter(t => t.status === 'done').length
+  const blockedCount = tasks.filter(t => t.status === 'blocked').length
+  const totalDoneBlocked = doneCount + blockedCount
+  const successRate = totalDoneBlocked > 0 ? Math.round((doneCount / totalDoneBlocked) * 100) : 100
+
+  const doneTasksWithDurations = tasks.filter(t => t.status === 'done' && t.started_at && t.completed_at)
+  let avgDurationStr = 'N/A'
+  if (doneTasksWithDurations.length > 0) {
+    const totalSecs = doneTasksWithDurations.reduce((acc, t) => {
+      const start = new Date(t.started_at)
+      const end = new Date(t.completed_at)
+      const dur = (end - start) / 1000
+      return acc + (dur > 0 ? dur : 0)
+    }, 0)
+    const avgSecs = Math.round(totalSecs / doneTasksWithDurations.length)
+    if (avgSecs < 60) {
+      avgDurationStr = `${avgSecs}s`
+    } else {
+      avgDurationStr = `${Math.round(avgSecs / 60)}m`
+    }
+  }
 
   const metricCards = [
     {
@@ -86,6 +117,26 @@ export default function OverviewPage({ overview, tasks, pipeline, credits, cronJ
         ))}
       </div>
 
+      {/* Performance Stats Row */}
+      <div className="perf-stats-row">
+        <div className="perf-stat-card">
+          <span className="perf-stat-label">Active Tasks</span>
+          <span className="perf-stat-value" style={{ color: 'var(--accent)' }}>{activeNow}</span>
+        </div>
+        <div className="perf-stat-card">
+          <span className="perf-stat-label">Success Rate</span>
+          <span className="perf-stat-value" style={{ color: 'var(--green)' }}>{successRate}%</span>
+        </div>
+        <div className="perf-stat-card">
+          <span className="perf-stat-label">Tasks Created (24h)</span>
+          <span className="perf-stat-value" style={{ color: 'var(--blue)' }}>{tasksToday}</span>
+        </div>
+        <div className="perf-stat-card">
+          <span className="perf-stat-label">Avg Completion Time</span>
+          <span className="perf-stat-value" style={{ color: 'var(--violet)' }}>{avgDurationStr}</span>
+        </div>
+      </div>
+
       {/* Lower panels */}
       <div className="page-grid">
         {/* Operations Pulse */}
@@ -108,24 +159,13 @@ export default function OverviewPage({ overview, tasks, pipeline, credits, cronJ
           </div>
         </div>
 
-        {/* Cron Faults */}
-        <div className="panel">
+        {/* Activity Feed panel (replaces Cron Faults) */}
+        <div className="panel span-2">
           <div className="panel-header">
-            <h2>Cron Faults</h2>
-            <span className="panel-badge">{overview?.cron?.total || 0} jobs</span>
+            <h2>Agent Activity Feed</h2>
+            <span className="panel-badge">{activities.length} items</span>
           </div>
-          <div className="stack">
-            {(overview?.cron?.errors || []).length === 0
-              ? <div className="empty">✓ No active cron errors</div>
-              : (overview.cron.errors.map((job) => (
-                  <div className="row-card" key={job.id || job.name}>
-                    <div className="row-card-body">
-                      <strong>{job.name || job.id}</strong>
-                    </div>
-                    <span className="status-pill error">error</span>
-                  </div>
-                )))}
-          </div>
+          <ActivityFeed activities={activities} onItemClick={onActivityClick} />
         </div>
 
         {/* Recent Pipeline */}
@@ -137,7 +177,7 @@ export default function OverviewPage({ overview, tasks, pipeline, credits, cronJ
           <div className="stack">
             {(pipeline?.recent || []).length === 0
               ? <div className="empty">No pipeline data</div>
-              : [...(pipeline?.recent || [])].reverse().map((job, i) => (
+              : [...(pipeline?.recent || [])].reverse().slice(0, 5).map((job, i) => (
                   <div className="row-card" key={`${job.company}-${i}`}>
                     <div className="row-card-body">
                       <strong>{job.company || 'Unknown'}</strong>
@@ -150,14 +190,14 @@ export default function OverviewPage({ overview, tasks, pipeline, credits, cronJ
         </div>
 
         {/* Credential Surface */}
-        <div className="panel span-2">
+        <div className="panel">
           <div className="panel-header">
             <h2>Credential Surface</h2>
             <span className="panel-badge">{activeCredits} active</span>
           </div>
           <div className="chip-grid">
             {Object.entries(credits || {}).map(([key, value]) => (
-              <span key={key} className={`chip ${value ? 'on' : 'off'}`}>
+              <span key={key} className={`chip ${value ? 'on' : 'off'}`} style={{ fontSize: '10px' }}>
                 {key}: {value ? '✓ active' : '✗ missing'}
               </span>
             ))}
@@ -167,7 +207,7 @@ export default function OverviewPage({ overview, tasks, pipeline, credits, cronJ
         {/* Cron Health Summary */}
         <div className="panel span-2">
           <div className="panel-header">
-            <h2>Cron Health</h2>
+            <h2>Cron Health Summary</h2>
             <span className="panel-badge">{cronJobs.length} tracked</span>
           </div>
           <div className="status-grid" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>

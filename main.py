@@ -723,6 +723,57 @@ def run_script(name: str) -> dict[str, Any]:
     return run(["python3", str(script_path)], timeout=120)
 
 
+@app.get("/api/activity")
+def activity_feed() -> list[dict[str, Any]]:
+    """Last 20 completed/blocked tasks with their most recent run summary."""
+    ensure_kanban_schema()
+    with sqlite3.connect(str(KANBAN_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        
+        # Check if task_runs table exists
+        runs_table_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='task_runs'"
+        ).fetchone()
+        
+        if not runs_table_exists:
+            rows = conn.execute("""
+                SELECT id, title, status, completed_at, started_at,
+                       NULL as summary, NULL as outcome, NULL as ended_at, NULL as run_started
+                FROM tasks
+                WHERE status IN ('done', 'blocked')
+                ORDER BY completed_at DESC
+                LIMIT 20
+            """).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT t.id, t.title, t.status, t.completed_at, t.started_at,
+                       r.summary, r.outcome, r.ended_at, r.started_at as run_started
+                FROM tasks t
+                LEFT JOIN task_runs r ON r.task_id = t.id AND r.id = (
+                    SELECT MAX(id) FROM task_runs WHERE task_id = t.id
+                )
+                WHERE t.status IN ('done', 'blocked')
+                ORDER BY t.completed_at DESC
+                LIMIT 20
+            """).fetchall()
+            
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["completed_at"] = timestamp_to_iso(d.get("completed_at"))
+        d["started_at"] = timestamp_to_iso(d.get("started_at"))
+        duration = None
+        if d.get("run_started") and d.get("ended_at"):
+            try:
+                duration = int(d["ended_at"]) - int(d["run_started"])
+            except (TypeError, ValueError):
+                pass
+        d["duration_secs"] = duration
+        d.pop("run_started", None)
+        result.append(d)
+    return result
+
+
 if FRONTEND_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR / "assets")), name="assets")
 

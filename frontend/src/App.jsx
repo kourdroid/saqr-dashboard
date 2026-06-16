@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, useRef } from 'react'
 
 import './App.css'
 
@@ -12,11 +12,14 @@ import ConfigPanel   from './components/ConfigPanel.jsx'
 import ScriptsPage   from './components/ScriptsPage.jsx'
 import ContainerPanel from './components/ContainerPanel.jsx'
 import MissionsPage  from './components/MissionsPage.jsx'
+import ChatPage      from './components/ChatPage.jsx'
+import TaskDrawer    from './components/TaskDrawer.jsx'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const TABS = [
   { key: 'overview',   label: 'Overview' },
+  { key: 'chat',       label: 'Chat' },
   { key: 'kanban',     label: 'Kanban' },
   { key: 'cron',       label: 'Cron' },
   { key: 'pipeline',   label: 'Pipeline' },
@@ -43,7 +46,7 @@ async function api(path, opts = {}) {
 }
 
 async function fetchSnapshot() {
-  const [overview, tasks, cronJobs, pipeline, credits, config, soul, env, scripts] = await Promise.all([
+  const [overview, tasks, cronJobs, pipeline, credits, config, soul, env, scripts, activities] = await Promise.all([
     api('/overview'),
     api('/kanban-tasks'),
     api('/cron-jobs'),
@@ -53,8 +56,9 @@ async function fetchSnapshot() {
     api('/soul-summary'),
     api('/env'),
     api('/scripts'),
+    api('/activity').catch(() => []), // Fallback if DB table not yet ready
   ])
-  return { overview, tasks, cronJobs, pipeline, credits, config, soul, env, scripts }
+  return { overview, tasks, cronJobs, pipeline, credits, config, soul, env, scripts, activities }
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -73,6 +77,7 @@ export default function App() {
   const [soul,       setSoul]       = useState(null)
   const [envKeys,    setEnvKeys]    = useState([])
   const [scripts,    setScripts]    = useState([])
+  const [activities, setActivities] = useState([])
 
   // Config editing
   const [configText,      setConfigText]      = useState('')
@@ -89,6 +94,44 @@ export default function App() {
   const [message,  setMessage]  = useState('')
   const [error,    setError]    = useState('')
 
+  // Toast stack & drawer state
+  const [toasts, setToasts] = useState([])
+  const [selectedTaskId, setSelectedTaskId] = useState(null)
+  const prevTasksRef = useRef([])
+
+  // ── Toast methods ───────────────────────────────────────────────────────────
+
+  const addToast = (text, type = 'info', taskId = null) => {
+    const id = `toast-${Date.now()}-${Math.random()}`
+    setToasts((prev) => [...prev, { id, text, type, taskId }])
+    
+    // Auto-dismiss after 4 seconds
+    setTimeout(() => {
+      dismissToast(id)
+    }, 4000)
+  }
+
+  const dismissToast = (id) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id))
+  }
+
+  // Task status transitions detection
+  useEffect(() => {
+    if (prevTasksRef.current && prevTasksRef.current.length > 0) {
+      tasks.forEach((newTask) => {
+        const oldTask = prevTasksRef.current.find((t) => t.id === newTask.id)
+        if (oldTask) {
+          if (oldTask.status !== 'done' && newTask.status === 'done') {
+            addToast(`✓ Task Completed: "${newTask.title}"`, 'ok', newTask.id)
+          } else if (oldTask.status !== 'blocked' && newTask.status === 'blocked') {
+            addToast(`⚠ Task Blocked: "${newTask.title}"`, 'error', newTask.id)
+          }
+        }
+      })
+    }
+    prevTasksRef.current = tasks
+  }, [tasks])
+
   // ── Data loading ────────────────────────────────────────────────────────────
 
   const applySnapshot = useCallback((snap) => {
@@ -101,6 +144,7 @@ export default function App() {
     setSoul(snap.soul)
     setEnvKeys(snap.env.keys || [])
     setScripts(snap.scripts)
+    setActivities(snap.activities || [])
     if (!configTextDirty) setConfigText(snap.config.raw || '')
   }, [configTextDirty])
 
@@ -244,7 +288,20 @@ export default function App() {
         onTabChange={handleTabChange}
       />
 
-      <NoticeBar message={message} error={error} />
+      <NoticeBar 
+        toasts={toasts}
+        onDismiss={dismissToast}
+        onToastClick={(taskId) => setSelectedTaskId(taskId)}
+        message={message} 
+        error={error} 
+      />
+
+      {selectedTaskId && (
+        <TaskDrawer
+          taskId={selectedTaskId}
+          onClose={() => setSelectedTaskId(null)}
+        />
+      )}
 
       <main>
         {activeTab === 'overview' && (
@@ -255,6 +312,14 @@ export default function App() {
             credits={credits}
             cronJobs={cronJobs}
             envKeys={envKeys}
+            activities={activities}
+            onActivityClick={(id) => setSelectedTaskId(id)}
+          />
+        )}
+
+        {activeTab === 'chat' && (
+          <ChatPage 
+            onOpenTaskDetail={(id) => setSelectedTaskId(id)} 
           />
         )}
 
@@ -265,6 +330,7 @@ export default function App() {
             onAdd={addTask}
             onMove={moveTask}
             onDelete={deleteTask}
+            onCardClick={(id) => setSelectedTaskId(id)}
           />
         )}
 
