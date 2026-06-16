@@ -35,13 +35,49 @@ Writes to `kanban.db` — the same SQLite database the Hermes gateway watches ev
 |--------|----------|-------------|------|
 | GET | `/api/kanban-tasks` | List all tasks (priority DESC, created DESC) | `main.py:468` |
 | POST | `/api/kanban-tasks` | Create task (auto-assigns `"default"` profile) | `main.py:473` |
-| PATCH | `/api/kanban-tasks/{id}` | Update task fields | `main.py:478` |
-| DELETE | `/api/kanban-tasks/{id}` | Delete task by ID | `main.py:484` |
+| GET | `/api/kanban-tasks/{id}` | Task detail with result, run history, events | `main.py:480` |
+| PATCH | `/api/kanban-tasks/{id}` | Update task fields | `main.py:484` |
+| DELETE | `/api/kanban-tasks/{id}` | Delete task by ID | `main.py:491` |
 
 Valid statuses: `backlog`, `ready`, `in_progress`, `blocked`, `done`
 Valid priorities: `0` (Normal), `1` (High), `2` (Critical)
 
 Tasks are dispatched by the Hermes gateway when `status=ready` and `assignee=default`.
+
+#### Task Detail Response (example)
+
+```json
+GET /api/kanban-tasks/04a54300a67e
+{
+  "id": "04a54300a67e",
+  "title": "find ceo of G4S",
+  "body": "",
+  "status": "done",
+  "priority": 0,
+  "assignee": "default",
+  "created_at": "2026-06-16T16:03:11+00:00",
+  "started_at": "2026-06-16T16:04:23+00:00",
+  "completed_at": "2026-06-16T16:05:50+00:00",
+  "result": null,
+  "runs": [
+    {
+      "id": 1,
+      "profile": "default",
+      "status": "done",
+      "outcome": "completed",
+      "summary": "Found the CEO / top executive of G4S: Ashley Almanza...",
+      "started_at": "2026-06-16T16:04:23+00:00",
+      "ended_at": "2026-06-16T16:05:50+00:00"
+    }
+  ],
+  "events": [
+    {"kind": "assigned", "payload": "{\"assignee\": \"default\"}"},
+    {"kind": "claimed", "payload": "..."},
+    {"kind": "spawned", "payload": "..."},
+    {"kind": "completed", "payload": "..."}
+  ]
+}
+```
 
 ### Config
 

@@ -289,6 +289,56 @@ def delete_kanban_task(task_id: str) -> None:
             raise HTTPException(404, "task not found")
 
 
+def get_kanban_task_detail(task_id: str) -> dict[str, Any]:
+    with sqlite3.connect(str(KANBAN_DB)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT id, title, body, status, priority, assignee,
+                   created_at, started_at, completed_at, created_by,
+                   result, max_retries, consecutive_failures, last_failure_error
+            FROM tasks WHERE id=?
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "task not found")
+        task = dict(row)
+        runs = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT id, profile, step_key, status, outcome, summary,
+                       started_at, ended_at, error
+                FROM task_runs WHERE task_id=?
+                ORDER BY id
+                """,
+                (task_id,),
+            ).fetchall()
+        ]
+        events = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT id, run_id, kind, payload, created_at
+                FROM task_events WHERE task_id=?
+                ORDER BY id
+                """,
+                (task_id,),
+            ).fetchall()
+        ]
+    for key in ("created_at", "started_at", "completed_at"):
+        task[key] = timestamp_to_iso(task.get(key))
+    for run in runs:
+        for key in ("started_at", "ended_at"):
+            run[key] = timestamp_to_iso(run.get(key))
+    for ev in events:
+        ev["created_at"] = timestamp_to_iso(ev.get("created_at"))
+    task["runs"] = runs
+    task["events"] = events
+    return task
+
+
 # Config
 
 def read_config() -> dict[str, Any]:
@@ -473,6 +523,11 @@ def list_tasks() -> list[dict[str, Any]]:
 @app.post("/api/kanban-tasks")
 def create_task(task: TaskCreate) -> dict[str, str]:
     return {"id": add_kanban_task(task)}
+
+
+@app.get("/api/kanban-tasks/{task_id}")
+def get_task(task_id: str) -> dict[str, Any]:
+    return get_kanban_task_detail(task_id)
 
 
 @app.patch("/api/kanban-tasks/{task_id}")
